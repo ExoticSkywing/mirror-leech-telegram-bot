@@ -11,7 +11,7 @@ from ..helper.telegram_helper.bot_commands import BotCommands
 async def start(_, message):
     buttons = ButtonMaker()
     buttons.url_button(
-        "Repo", "https://www.github.com/anasty17/mirror-leech-telegram-bot"
+        "aaaaaaa", "https://lmyz.1yo.cc"
     )
     buttons.url_button("Code Owner", "https://t.me/anas_tayyar")
     reply_markup = buttons.build_menu(2)
