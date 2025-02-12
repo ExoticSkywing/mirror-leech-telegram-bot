@@ -132,7 +132,7 @@ class TelegramUploader:
 
     async def _prepare_file(self, file_, dirpath):
         if self._lprefix:
-            cap_mono = f"{self._lprefix} <code>{file_}</code>"
+            cap_mono = f"{self._lprefix}\n\n <code>{file_}</code>"
             self._lprefix = re_sub("<.*?>", "", self._lprefix)
             new_path = ospath.join(dirpath, f"{self._lprefix} {file_}")
             await rename(self._up_path, new_path)
