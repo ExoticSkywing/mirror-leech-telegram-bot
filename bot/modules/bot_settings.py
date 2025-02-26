@@ -32,7 +32,6 @@ from .. import (
 )
 from ..helper.ext_utils.bot_utils import (
     SetInterval,
-    sync_to_async,
     new_task,
 )
 from ..core.config_manager import Config
@@ -258,6 +257,7 @@ async def edit_variable(_, message, pre_message, key):
                 )
     elif key == "TORRENT_TIMEOUT":
         await TorrentManager.change_aria2_option("bt-stop-timeout", value)
+        value = int(value)
     elif key == "LEECH_SPLIT_SIZE":
         value = min(int(value), TgClient.MAX_SPLIT_SIZE)
     elif key == "BASE_URL_PORT":
@@ -440,10 +440,9 @@ async def sync_jdownloader():
 async def update_private_file(_, message, pre_message):
     handler_dict[message.chat.id] = False
     if not message.media and (file_name := message.text):
-        fn = file_name.rsplit(".zip", 1)[0]
-        if await aiopath.isfile(fn) and file_name != "config.py":
-            await remove(fn)
-        if fn == "accounts":
+        if await aiopath.isfile(file_name) and file_name != "config.py":
+            await remove(file_name)
+        if file_name == "accounts.zip":
             if await aiopath.exists("accounts"):
                 await rmtree("accounts", ignore_errors=True)
             if await aiopath.exists("rclone_sa"):
@@ -512,8 +511,6 @@ async def update_private_file(_, message, pre_message):
         await rclone_serve_booter()
     await update_buttons(pre_message)
     await database.update_private_file(file_name)
-    if await aiopath.exists("accounts.zip"):
-        await remove("accounts.zip")
 
 
 async def event_handler(client, query, pfunc, rfunc, document=False):
@@ -657,7 +654,7 @@ async def edit_bot_settings(client, query):
             "Syncronization Started. It takes up to 2 sec!", show_alert=True
         )
         qbit_options.clear()
-        await sync_to_async(update_qb_options)
+        await update_qb_options()
         await database.save_qbit_settings()
     elif data[1] == "emptyaria":
         await query.answer()
