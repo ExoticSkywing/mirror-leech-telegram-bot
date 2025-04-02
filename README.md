@@ -331,7 +331,7 @@ Fill up rest of the fields. Meaning of each field is discussed below.
 **4. Rclone**
 
 - `RCLONE_PATH` (`Str`): Default rclone path to which you want to upload all the files/folders using rclone.
-- `RCLONE_FLAGS` (`Str`): key:value|key|key|key:value . Check here all [RcloneFlags](https://rclone.org/flags/).
+- `RCLONE_FLAGS` (`Str`): --key:value|--key|--key|--key:value . Check here all [RcloneFlags](https://rclone.org/flags/).
 - `RCLONE_SERVE_URL` (`Str`): Valid URL where the bot is deployed to use rclone serve. Format of URL should be `http://myip`, where `myip` is the IP/Domain(public) of your bot or if you have chosen port other than `80` so write it in this format `http://myip:port` (`http` and not `https`). `Str`
 - `RCLONE_SERVE_PORT` (`Int`): Which is the **RCLONE_SERVE_URL** Port. Default is `8080`.
 - `RCLONE_SERVE_USER` (`Str`): Username for rclone serve authentication.
@@ -494,8 +494,33 @@ sudo docker compose logs --follow
 1. Flush your machine iptables to use your opened ports with docker from the host network. 
 
 ```
+# Flush All Rules (Reset iptables)
 sudo iptables -F
+sudo iptables -X
 sudo iptables -t nat -F
+sudo iptables -t nat -X
+sudo iptables -t mangle -F
+sudo iptables -t mangle -X
+
+sudo ip6tables -F
+sudo ip6tables -X
+sudo ip6tables -t nat -F
+sudo ip6tables -t nat -X
+sudo ip6tables -t mangle -F
+sudo ip6tables -t mangle -X
+
+# Set Default Policies
+sudo iptables -P INPUT ACCEPT
+sudo iptables -P FORWARD ACCEPT
+sudo iptables -P OUTPUT ACCEPT
+
+sudo ip6tables -P INPUT ACCEPT
+sudo ip6tables -P FORWARD ACCEPT
+sudo ip6tables -P OUTPUT ACCEPT
+
+# save
+sudo iptables-save | sudo tee /etc/iptables/rules.v4
+sudo ip6tables-save | sudo tee /etc/iptables/rules.v6
 ```
 
 2. Set `BASE_URL_PORT` and `RCLONE_SERVE_PORT` variables to any port you want to use. Default is `80` and `8080`
