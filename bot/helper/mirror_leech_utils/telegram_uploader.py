@@ -36,6 +36,7 @@ from ..ext_utils.media_utils import (
     get_video_thumbnail,
     get_audio_thumbnail,
     get_multiple_frames_thumbnail,
+    get_video_dimensions,
 )
 
 LOGGER = getLogger(__name__)
@@ -378,7 +379,11 @@ class TelegramUploader:
                     )
                 if thumb is None:
                     thumb = await get_video_thumbnail(self._up_path, duration)
-                if thumb is not None and thumb != "none":
+                # 优先用真实视频分辨率，避免比例拉伸
+                v_w, v_h = await get_video_dimensions(self._up_path)
+                if isinstance(v_w, int) and isinstance(v_h, int) and v_w > 0 and v_h > 0:
+                    width, height = v_w, v_h
+                elif thumb is not None and thumb != "none":
                     with Image.open(thumb) as img:
                         width, height = img.size
                 else:

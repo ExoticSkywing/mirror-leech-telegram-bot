@@ -67,6 +67,11 @@ class Config:
     USE_SERVICE_ACCOUNTS = False
     WEB_PINCODE = False
     YT_DLP_OPTIONS = {}
+    # Custom
+    PARSE_VIDEO_API = ""
+    PARSE_VIDEO_ENABLED = False
+    PARSE_VIDEO_TIMEOUT = 30
+    GALLERY_UPLOAD_TO_DUMP = True
 
     @classmethod
     def _convert(cls, key: str, value):

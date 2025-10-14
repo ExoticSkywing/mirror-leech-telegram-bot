@@ -113,6 +113,43 @@ async def get_document_type(path):
     return is_video, is_audio, is_image
 
 
+async def get_video_dimensions(path):
+    """Return (width, height) of the first video stream using ffprobe, or (None, None) on failure."""
+    try:
+        result = await cmd_exec(
+            [
+                "ffprobe",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-print_format",
+                "json",
+                path,
+            ]
+        )
+    except Exception as e:
+        LOGGER.error(f"Get Video Dimensions error: {e}. File: {path}")
+        return None, None
+    if result[0] and result[2] == 0:
+        try:
+            data = eval(result[0])
+            streams = data.get("streams") or []
+            if not streams:
+                return None, None
+            width = streams[0].get("width")
+            height = streams[0].get("height")
+            if isinstance(width, int) and isinstance(height, int):
+                return width, height
+        except Exception as e:
+            LOGGER.error(f"Parse Video Dimensions error: {e}. File: {path}")
+            return None, None
+    return None, None
+
+
 async def take_ss(video_file, ss_nb) -> bool:
     duration = (await get_media_info(video_file))[0]
     if duration != 0:

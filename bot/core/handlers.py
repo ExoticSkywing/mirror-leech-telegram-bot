@@ -1,7 +1,9 @@
-from pyrogram.filters import command, regex
+from pyrogram.filters import command, regex, text
+from pyrogram import filters
 from pyrogram.handlers import MessageHandler, CallbackQueryHandler, EditedMessageHandler
 
 from ..modules import *
+from ..modules.direct_link_handler import handle_direct_message
 from ..helper.telegram_helper.bot_commands import BotCommands
 from ..helper.telegram_helper.filters import CustomFilters
 from .mltb_client import TgClient
@@ -318,4 +320,16 @@ def add_handlers():
             filters=command(BotCommands.NzbSearchCommand, case_sensitive=True)
             & CustomFilters.authorized,
         )
+    )
+    
+    # Parse-Video直接链接处理器（无命令消息）
+    # 必须放在最后，避免干扰现有命令
+    TgClient.bot.add_handler(
+        MessageHandler(
+            handle_direct_message,
+            filters=(text | filters.caption) 
+            & ~command("") 
+            & CustomFilters.authorized,
+        ),
+        group=-1  # 较低优先级
     )
