@@ -244,8 +244,11 @@ class VideoLinkProcessor(TaskListener):
                         if (f.get("ext") == "mp4" and (f.get("height") == 1080)):
                             fps = f.get("fps")
                             # 精确 30fps（可能是 30 或 30.0）
-                            if fps is not None and float(fps) == 30.0:
-                                candidates.append(f)
+                            try:
+                                if fps is not None and float(fps) == 30.0:
+                                    candidates.append(f)
+                            except Exception:
+                                continue
                     if not candidates:
                         return None
                     # 优先 avc1，再按 tbr 最大
@@ -255,14 +258,19 @@ class VideoLinkProcessor(TaskListener):
                 formats_list = result.get("formats") or []
                 exact_fmt = pick_exact_1080p30_mp4(formats_list)
                 if exact_fmt:
-                    # 完全等效于按钮：format_id + ba[ext=m4a]，再到 +ba，再到同高回退
-                    preferred_qual = f"{exact_fmt}+ba[ext=m4a]/{exact_fmt}+ba/b[height=?1080]"
+                    # 完全等效于按钮：format_id + ba[ext=m4a]，再到 +ba，再到同高回退（强制 fps<=30）
+                    preferred_qual = (
+                        f"{exact_fmt}+ba[ext=m4a]/{exact_fmt}+ba/"
+                        "bv*[ext=mp4][height=1080][fps<=30]+ba[ext=m4a]/"
+                        "bv*[ext=mp4][height<=1080][fps<=30]+ba/b[height<=1080]"
+                    )
                 else:
-                    # 如果没有严格 1080p30-mp4，则回退到 1080p avc1（≤30fps）
+                    # 没有严格 1080p30-mp4：所有回退均限制 fps<=30，优先 avc1
                     preferred_qual = (
                         "bv*[ext=mp4][vcodec*=avc1][height=1080][fps<=30]+ba[ext=m4a]"
-                        "/bv*[ext=mp4][vcodec*=avc1][height=1080]+ba"
-                        "/b[height=?1080]"
+                        "/bv*[ext=mp4][vcodec*=avc1][height<=1080][fps<=30]+ba[ext=m4a]"
+                        "/bv*[ext=mp4][height<=1080][fps<=30]+ba/"
+                        "b[height<=1080]"
                     )
             elif domain in {"bilibili.com"}:
                 # B站：默认中等清晰度（≤720p）以控制体积
