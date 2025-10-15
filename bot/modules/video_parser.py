@@ -459,6 +459,9 @@ class VideoLinkProcessor(TaskListener):
                 f"📹 {video_info.get('title', '图集')}",
             )
             
+            # 从第一张图片开始下载的时间点
+            start_ts = time()
+
             # 并发下载所有图片
             import asyncio
             download_tasks = [download_single_image(idx, img_data) for idx, img_data in enumerate(images_list)]
@@ -551,10 +554,22 @@ class VideoLinkProcessor(TaskListener):
 
             # 单条完成提示：总成功数量 + 相册链接列表
             success_rate = f"{total_sent}/{len(images_list)}"
+            # 计算从“开始下载第一张图片”到“所有相册上传完毕”的总耗时
+            elapsed_seconds = int(time() - start_ts)
+            def _format_duration(seconds):
+                seconds = int(seconds)
+                minutes, secs = divmod(seconds, 60)
+                hours, mins = divmod(minutes, 60)
+                if hours:
+                    return f"{hours}小时{mins}分{secs}秒"
+                if mins:
+                    return f"{mins}分{secs}秒"
+                return f"{secs}秒"
             text = (
                 f"✅ <b>图集上传完成</b>  📸 {success_rate}\n\n"
                 f"{video_info.get('title', '图集')}\n\n"
-                f"👤 {video_info.get('author', '未知作者')}"
+                f"👤 {video_info.get('author', '未知作者')}\n"
+                f"⏱️ 耗时: {_format_duration(elapsed_seconds)}"
             )
             if total_sent < len(images_list):
                 failed_count = len(images_list) - total_sent
