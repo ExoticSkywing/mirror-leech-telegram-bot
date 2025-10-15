@@ -18,6 +18,7 @@ from bot.helper.ext_utils.url_utils import get_domain
 from bot.helper.parse_video_helper import parse_video_api, format_video_info
 from bot.helper.listeners.task_listener import TaskListener
 from bot.helper.mirror_leech_utils.download_utils.yt_dlp_download import YoutubeDLHelper
+from bot.helper.ext_utils.membership_utils import check_membership
 from bot.helper.telegram_helper.message_utils import (
     send_message,
     edit_message,
@@ -83,6 +84,18 @@ class VideoLinkProcessor(TaskListener):
         )
 
         try:
+            # 关键阶段直查 1：下载前校验（忽略缓存，确保未取关）
+            try:
+                from bot.core.config_manager import Config as CFG
+                if CFG.PARSE_VIDEO_CHANNEL_CHECK_ENABLED and CFG.PARSE_VIDEO_CHECK_SCOPE in {"direct_only", "all"}:
+                    # 豁免逻辑在 check_membership 内部已处理，这里直接调用直查
+                    ok = await check_membership(self.client, self.message.from_user.id, use_cache=False)
+                    if not ok:
+                        await edit_message(self.status_msg, "❌ 已取消：请先关注指定频道再使用。")
+                        await self.remove_from_same_dir()
+                        return
+            except Exception:
+                pass
             # 策略1: 尝试Parse-Video解析
             video_direct_url = None
             video_info = {}
@@ -173,6 +186,13 @@ class VideoLinkProcessor(TaskListener):
             )
 
             await self.remove_from_same_dir()
+
+    async def on_upload_start(self):
+        """上传开始前的钩子。
+        允许当前已通过校验且已启动的任务继续上传，即使期间用户取关；
+        因此此处不再进行二次拦截，下一次新任务会在入口处重新校验。
+        """
+        return
 
     async def _download_with_ytdlp(self, url, video_info=None):
         """使用yt-dlp下载视频"""

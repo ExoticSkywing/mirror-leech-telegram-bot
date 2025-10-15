@@ -3,6 +3,8 @@ from pyrogram import filters
 from pyrogram.handlers import MessageHandler, CallbackQueryHandler, EditedMessageHandler
 
 from ..modules import *
+from pyrogram.filters import regex as _regex
+from ..helper.ext_utils.membership_utils import check_membership as _pv_check
 from ..modules.direct_link_handler import handle_direct_message
 from ..helper.telegram_helper.bot_commands import BotCommands
 from ..helper.telegram_helper.filters import CustomFilters
@@ -322,14 +324,28 @@ def add_handlers():
         )
     )
     
+    # Parse-Video 频道验证按钮回调
+    async def _pvcheck_cb(_, query):
+        try:
+            ok = await _pv_check(query._client, query.from_user.id, use_cache=False)
+            if ok:
+                await query.answer("验证通过，请重新发送链接", show_alert=True)
+            else:
+                await query.answer("还未检测到关注，请先关注频道再试", show_alert=True)
+        except Exception:
+            await query.answer("验证失败，请稍后再试", show_alert=True)
+
+    TgClient.bot.add_handler(
+        CallbackQueryHandler(_pvcheck_cb, filters=_regex("^pvcheck$"))
+    )
+
     # Parse-Video直接链接处理器（无命令消息）
     # 必须放在最后，避免干扰现有命令
     TgClient.bot.add_handler(
         MessageHandler(
             handle_direct_message,
             filters=(text | filters.caption) 
-            & ~command("") 
-            & CustomFilters.authorized,
+            & ~command(""),
         ),
         group=-1  # 较低优先级
     )

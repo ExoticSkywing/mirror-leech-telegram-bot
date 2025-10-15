@@ -4,10 +4,13 @@
 """
 
 from bot import LOGGER
+from bot.core.config_manager import Config
+from bot.helper.ext_utils.membership_utils import check_membership
 from bot.helper.ext_utils.bot_utils import new_task
 from bot.helper.ext_utils.url_utils import extract_url_from_text
 from bot.helper.telegram_helper.filters import CustomFilters
-from bot.helper.telegram_helper.message_utils import send_message
+from bot.helper.telegram_helper.message_utils import send_message, edit_message
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from bot.modules.video_parser import handle_video_link
 
 
@@ -40,7 +43,29 @@ async def handle_direct_message(client, message):
     url = extract_url_from_text(text)
     
     if url:
-        # 有链接：走Parse-Video处理流程
+        # 有链接：直链入口权限校验（仅 direct_only 或 all 生效）
+        try:
+            if Config.PARSE_VIDEO_CHANNEL_CHECK_ENABLED and Config.PARSE_VIDEO_CHECK_SCOPE in {"direct_only", "all"}:
+                ok = await check_membership(client, message.from_user.id, use_cache=True)
+                if not ok:
+                    # 提示关注 + 验证按钮
+                    btns = []
+                    try:
+                        ch = (Config.PARSE_VIDEO_REQUIRED_CHANNELS or [None])[0]
+                        if isinstance(ch, str) and ch.startswith("@"):
+                            btns.append([InlineKeyboardButton("📢 打开频道", url=f"https://t.me/{ch.lstrip('@')}")])
+                    except Exception:
+                        pass
+                    btns.append([InlineKeyboardButton("✅ 已关注，点我验证", callback_data="pvcheck")])
+                    await send_message(
+                        message,
+                        "⚠️ 使用前请先关注我们的频道，再点一次验证即可继续。",
+                        InlineKeyboardMarkup(btns),
+                    )
+                    return
+        except Exception:
+            pass
+
         LOGGER.info(f"Direct link detected from user {message.from_user.id}: {url[:50]}...")
         await handle_video_link(client, message, url)
     

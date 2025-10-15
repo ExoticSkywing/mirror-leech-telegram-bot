@@ -72,6 +72,13 @@ class Config:
     PARSE_VIDEO_ENABLED = False
     PARSE_VIDEO_TIMEOUT = 30
     GALLERY_UPLOAD_TO_DUMP = True
+    # Membership gating for direct-link flow
+    PARSE_VIDEO_CHANNEL_CHECK_ENABLED = False
+    PARSE_VIDEO_REQUIRED_CHANNELS = []
+    PARSE_VIDEO_REQUIRE_ALL = False
+    PARSE_VIDEO_CHECK_SCOPE = "direct_only"  # direct_only | all
+    PARSE_VIDEO_EXEMPT_CONFIG_AUTH = True
+    PARSE_VIDEO_MEMBERSHIP_CACHE_TTL = 60
 
     @classmethod
     def _convert(cls, key: str, value):
