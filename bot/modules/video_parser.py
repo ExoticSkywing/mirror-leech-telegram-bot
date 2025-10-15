@@ -363,8 +363,10 @@ class VideoLinkProcessor(TaskListener):
         from pyrogram.types import InputMediaPhoto
         from asyncio import sleep
         from pyrogram.errors import FloodWait
+        from time import time
         
         LOGGER.info("Attempting direct URL upload for gallery")
+        start_ts = time()  # 记录开始时间
         
         # 提取图片 URLs
         image_urls = []
@@ -386,38 +388,54 @@ class VideoLinkProcessor(TaskListener):
         else:
             upload_dest = self.message.chat.id
         
-        # 更新状态
-        await edit_message(
-            self.status_msg,
-            f"⚡ 正在通过 URL 直传 {len(image_urls)} 张图片...\n"
-            f"📹 {video_info.get('title', '图集')}",
-        )
+        # 分批上传（串行，每批最多10张，固定延迟避免FloodWait）
+        from ..helper.telegram_helper.button_build import ButtonMaker
         
-        # 分批上传（每批最多10张）
         total_imgs = len(image_urls)
         total_batches = (len(image_urls) + 9) // 10
-        upload_status_msg = await send_message(
-            self.message,
-            f"⬆️ 正在上传图集… 0/{total_imgs} (0/{total_batches} 组)"
-        )
         
+        # 直接更新现有状态消息为上传进度
+        title = video_info.get('title', '图集')
+        author = video_info.get('author', '未知作者')
+        await edit_message(
+            self.status_msg,
+            f"✅ <b>解析成功！</b>共 {total_imgs} 张图片\n\n"
+            f"📹 {title}\n"
+            f"👤 {author}\n\n"
+            f"📤 正在做预处理... 0/{total_imgs}"
+        )
+        upload_status_msg = self.status_msg  # 复用同一个消息
+        
+        base_caption = self._build_caption(video_info)
         total_sent = 0
         album_links = []
-        caption = self._build_caption(video_info)
         batch_index = 0
         
+        # 获取用户信息
+        user_name = self.message.from_user.first_name or "未知用户"
+        user_mention = f"<a href='https://t.me/nebuluxe_flash_bot'>{user_name}</a>"
+        
+        # 串行上传每个批次
         for start in range(0, len(image_urls), 10):
             batch_urls = image_urls[start:start + 10]
             media_group = []
             
+            # 为每个相册添加标注
+            album_number = batch_index + 1
+            album_caption = f"{base_caption}\n\n📌 来自 {user_mention} 的相册 {album_number}/{total_batches}"
+            
+            # 构建媒体组
             for idx, img_url in enumerate(batch_urls):
-                if batch_index == 0 and idx == 0:
-                    media_group.append(InputMediaPhoto(media=img_url, caption=caption))
+                if idx == 0:  # 每个相册的第一张图片带 caption
+                    media_group.append(InputMediaPhoto(media=img_url, caption=album_caption))
                 else:
                     media_group.append(InputMediaPhoto(media=img_url))
             
-            LOGGER.info(f"Uploading URL media group batch {batch_index + 1} with {len(media_group)} images")
+            LOGGER.info(f"Uploading URL media group batch {batch_index + 1}/{total_batches} ({len(media_group)} images)")
+            
+            # 上传批次（带重试机制）
             attempt = 0
+            max_flood_wait = 60
             while True:
                 try:
                     msgs = await self.client.send_media_group(
@@ -426,57 +444,84 @@ class VideoLinkProcessor(TaskListener):
                     break
                 except FloodWait as f:
                     wait_s = int(f.value) + 1
-                    LOGGER.warning(f"FloodWait while sending URL album batch {batch_index + 1}: wait {wait_s}s")
+                    if wait_s > max_flood_wait:
+                        LOGGER.error(f"FloodWait too long ({wait_s}s), aborting URL upload")
+                        raise
+                    LOGGER.warning(f"⏳ FloodWait {wait_s}s for batch {batch_index + 1}/{total_batches}")
+                    # 更新进度提示：显示等待状态
+                    try:
+                        # 构建当前的按钮（已上传的相册）
+                        buttons = ButtonMaker()
+                        for i, link in enumerate(album_links):
+                            buttons.url_button(f"📸 相册 {i+1}", link)
+                        
+                        await edit_message(
+                            upload_status_msg,
+                            f"✅ <b>解析成功！</b>共 {total_imgs} 张图片\n\n"
+                            f"📹 {title}\n"
+                            f"👤 {author}\n\n"
+                            f"⏳ 人数过多需排队，请耐心等待  {wait_s}秒… {total_sent}/{total_imgs}",
+                            buttons.build_menu(3) if album_links else None
+                        )
+                    except Exception:
+                        pass
                     await sleep(wait_s)
                     attempt += 1
                     if attempt >= 3:
+                        LOGGER.error(f"Max FloodWait retries reached")
                         raise
                 except Exception as e:
-                    # 如果是媒体无效、URL过期等错误，直接抛出让外层回退
-                    LOGGER.error(f"URL upload failed for batch {batch_index + 1}: {e}")
+                    LOGGER.error(f"URL upload failed: {e}")
                     raise
             
+            # 记录结果
             total_sent += len(msgs)
             if msgs and hasattr(msgs[0], "link"):
                 album_links.append(msgs[0].link)
             batch_index += 1
             
-            # 更新上传进度
+            # 实时更新进度 + 已上传相册的按钮
             try:
+                buttons = ButtonMaker()
+                for i, link in enumerate(album_links):
+                    buttons.url_button(f"📸 相册 {i+1}", link)
+                
                 await edit_message(
                     upload_status_msg,
-                    f"⬆️ 正在上传图集… {total_sent}/{total_imgs} ({batch_index}/{total_batches} 组)"
+                    f"✅ <b>解析成功！</b>共 {total_imgs} 张图片\n\n"
+                    f"📹 {title}\n"
+                    f"👤 {author}\n\n"
+                    f"📤 上传中: {total_sent}/{total_imgs} ({batch_index}/{total_batches} 组) ⚡",
+                    buttons.build_menu(3)
                 )
             except Exception:
                 pass
-            await sleep(1)
+            
+            # 批次间延迟（安全阈值，避免触发FloodWait）
+            if batch_index < total_batches:  # 最后一批不需要延迟
+                await sleep(1.5)
         
-        # 删除状态消息
-        await delete_message(self.status_msg)
-        self.status_msg = None
-        
-        # 发送完成消息
+        # 最终汇总消息：更新原消息为完成状态 + 所有相册按钮
         from time import time
-        text = (
-            f"✅ <b>图集上传完成</b> ⚡ <i>URL直传模式</i>  📸 {total_sent}/{total_imgs}\n\n"
-            f"{video_info.get('title', '图集')}\n\n"
-            f"👤 {video_info.get('author', '未知作者')}"
-        )
-        if album_links:
-            if len(album_links) == 1:
-                text += f"\n🔗 <a href='{album_links[0]}'>查看相册</a>"
-            else:
-                links_str = "\n".join(
-                    [f"🔗 <a href='{lnk}'>相册 {i+1}</a>" for i, lnk in enumerate(album_links)]
-                )
-                text += f"\n{links_str}"
-        await send_message(self.message, text)
+        buttons = ButtonMaker()
+        for i, link in enumerate(album_links):
+            buttons.url_button(f"📸 相册 {i+1}", link)
         
-        # 删除上传进度提示
+        # 计算耗时（从开始到现在）
+        elapsed = int(time() - start_ts)
+        
         try:
-            await delete_message(upload_status_msg)
-        except Exception:
-            pass
+            await edit_message(
+                upload_status_msg,
+                f"✅ <b>图集上传完成</b> 📸 {total_sent}/{total_imgs}\n\n"
+                f"📹 {title}\n"
+                f"👤 {author}\n\n"
+                f"⏱️ 耗时: {elapsed}秒\n"
+                f"⚡ 直传模式",
+                buttons.build_menu(3)
+            )
+        except Exception as e:
+            LOGGER.warning(f"Failed to update final message: {e}")
         
         LOGGER.info(f"URL direct upload successful: {total_sent}/{total_imgs} images")
 
@@ -752,29 +797,45 @@ class VideoLinkProcessor(TaskListener):
             else:
                 upload_dest = self.message.chat.id
 
-            # 分批上传（每批最多10张）
+            # 分批上传（串行，每批最多10张，固定延迟避免FloodWait）
             total_imgs = len(images_list)
             total_batches = (len(downloaded_images) + 9) // 10
             # 上传期间的进度提示
             upload_status_msg = await send_message(
                 self.message,
-                f"⬆️ 正在上传图集… 0/{total_imgs} (0/{total_batches} 组)"
+                f"⬆️ 正在上传图集… 0/{total_imgs} (0/{total_batches} 组) 📥 下载模式"
             )
+            
+            base_caption = self._build_caption(video_info)
             total_sent = 0
             album_links = []
-            caption = self._build_caption(video_info)
             batch_index = 0
+            
+            # 获取用户信息
+            user_name = self.message.from_user.first_name or "未知用户"
+            user_mention = f"<a href='https://t.me/nebuluxe_flash_bot'>{user_name}</a>"
+            
+            # 串行上传每个批次
             for start in range(0, len(downloaded_images), 10):
                 batch_paths = downloaded_images[start:start + 10]
                 media_group = []
+                
+                # 为每个相册添加标注
+                album_number = batch_index + 1
+                album_caption = f"{base_caption}\n\n📌 来自 {user_mention} 的相册 {album_number}/{total_batches}"
+                
+                # 构建媒体组
                 for idx, img_path in enumerate(batch_paths):
-                    if batch_index == 0 and idx == 0:
-                        media_group.append(InputMediaPhoto(media=img_path, caption=caption))
+                    if idx == 0:  # 每个相册的第一张图片带 caption
+                        media_group.append(InputMediaPhoto(media=img_path, caption=album_caption))
                     else:
                         media_group.append(InputMediaPhoto(media=img_path))
-
-                LOGGER.info(f"Uploading media group batch {batch_index + 1} with {len(media_group)} images")
+                
+                LOGGER.info(f"Uploading media group batch {batch_index + 1}/{total_batches} ({len(media_group)} images)")
+                
+                # 上传批次（带重试机制）
                 attempt = 0
+                max_flood_wait = 60
                 while True:
                     try:
                         msgs = await self.client.send_media_group(
@@ -783,24 +844,42 @@ class VideoLinkProcessor(TaskListener):
                         break
                     except FloodWait as f:
                         wait_s = int(f.value) + 1
-                        LOGGER.warning(f"FloodWait while sending album batch {batch_index + 1}: wait {wait_s}s")
+                        if wait_s > max_flood_wait:
+                            LOGGER.error(f"FloodWait too long ({wait_s}s), aborting")
+                            raise
+                        LOGGER.warning(f"⏳ FloodWait {wait_s}s for batch {batch_index + 1}/{total_batches}")
+                        # 更新进度提示：显示等待状态
+                        try:
+                            await edit_message(
+                                upload_status_msg,
+                                f"⏳ 人数过多需排队，请耐心等待 {wait_s}秒… {total_sent}/{total_imgs} ({batch_index}/{total_batches} 组)"
+                            )
+                        except Exception:
+                            pass
                         await sleep(wait_s)
                         attempt += 1
                         if attempt >= 3:
+                            LOGGER.error(f"Max FloodWait retries reached")
                             raise
+                
+                # 记录结果
                 total_sent += len(msgs)
                 if msgs and hasattr(msgs[0], "link"):
                     album_links.append(msgs[0].link)
                 batch_index += 1
-                # 更新上传进度提示
+                
+                # 更新进度
                 try:
                     await edit_message(
                         upload_status_msg,
-                        f"⬆️ 正在上传图集… {total_sent}/{total_imgs} ({batch_index}/{total_batches} 组) 请耐心等待☺"
+                        f"⬆️ 正在上传图集… {total_sent}/{total_imgs} ({batch_index}/{total_batches} 组) 📥"
                     )
                 except Exception:
                     pass
-                await sleep(1)
+                
+                # 批次间延迟（安全阈值，避免触发FloodWait）
+                if batch_index < total_batches:  # 最后一批不需要延迟
+                    await sleep(2)
 
             LOGGER.info(f"Media gallery uploaded in {batch_index} batch(es), total sent: {total_sent}")
 
@@ -886,21 +965,53 @@ class VideoLinkProcessor(TaskListener):
         return "\n".join(lines) if lines else "图集"
 
     def _sanitize_filename(self, filename):
-        """清理文件名，移除非法字符"""
+        """清理文件名，移除非法字符并智能截取"""
         import re
 
         if not filename:
             return "video"
         
+        original = str(filename)
+        
+        # 移除或替换非法字符
+        filename = re.sub(r'[<>:"/\\|?*]', "", original)
+        
+        # 如果原始文本包含换行符，说明是多行文案
+        if '\n' in original or len(filename) > 80:
+            lines = original.split('\n')
+            lines = [line.strip() for line in lines if line.strip()]
+            
+            if len(lines) > 3:
+                # 多行文案：保留前两行 + 最后一行（通常是标签）
+                parts = []
+                # 前两行
+                for i in range(min(2, len(lines))):
+                    parts.append(lines[i][:30])  # 每行最多30字符
+                # 最后一行（标签）
+                if len(lines) > 2:
+                    last_line = lines[-1]
+                    # 如果最后一行是标签（包含#），保留
+                    if '#' in last_line:
+                        parts.append(last_line[:40])
+                
+                filename = ' '.join(parts)
+            else:
+                # 少于3行，直接合并
+                filename = ' '.join(lines)
+        
         # 移除换行符和多余空白
-        filename = str(filename).replace('\n', ' ').replace('\r', ' ')
+        filename = filename.replace('\n', ' ').replace('\r', ' ')
         # 合并多个空格为一个
         filename = re.sub(r'\s+', ' ', filename)
-        # 移除或替换非法字符
+        # 再次移除非法字符
         filename = re.sub(r'[<>:"/\\|?*]', "", filename)
-        # 限制长度（考虑到扩展名，保留更多空间）
-        if len(filename) > 150:
-            filename = filename[:150]
+        
+        # 最终长度限制（50字符，约150字节）
+        # Linux 文件名最大 255 字节，UTF-8 中文占 3 字节
+        max_length = 50
+        if len(filename) > max_length:
+            filename = filename[:max_length].rstrip()
+        
         result = filename.strip()
         return result if result else "video"
 
