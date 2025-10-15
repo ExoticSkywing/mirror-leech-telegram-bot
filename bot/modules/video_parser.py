@@ -164,9 +164,32 @@ class VideoLinkProcessor(TaskListener):
                     f"🔗 <code>{self.url[:60]}...</code>",
                 )
 
-            # 策略2: 使用yt-dlp下载视频
-            # 如果有直链就下载直链，否则下载原链接
+            # 策略2: 视频处理 - 先尝试URL直传，失败后下载
             download_url = video_direct_url if video_direct_url else self.url
+            
+            # 对于Parse-Video成功解析的直链，先尝试URL直传（仅小红书）
+            if video_direct_url and video_info:
+                try:
+                    # 通过URL特征检测平台（Parse-Video返回的数据中没有platform字段）
+                    # 仅对小红书启用视频URL直传
+                    is_xiaohongshu = any([
+                        'xhslink.com' in self.url.lower(),
+                        'xiaohongshu.com' in self.url.lower(),
+                        'xhscdn.com' in download_url.lower(),
+                    ])
+                    
+                    if is_xiaohongshu:
+                        LOGGER.info(f"Detected Xiaohongshu video, attempting URL direct upload")
+                        # 添加平台信息到video_info
+                        video_info['platform'] = 'Xiaohongshu'
+                        await self._upload_video_by_url(download_url, video_info)
+                        return  # 成功则直接返回
+                    else:
+                        LOGGER.info(f"Non-Xiaohongshu video, using download mode (URL: {self.url[:50]}...)")
+                except Exception as url_err:
+                    LOGGER.warning(f"Video URL direct upload failed: {url_err}, falling back to download mode")
+            
+            # 回退：使用yt-dlp下载视频
             await self._download_with_ytdlp(download_url, video_info)
 
         except Exception as e:
@@ -326,10 +349,223 @@ class VideoLinkProcessor(TaskListener):
             # 重新抛出异常，让上层处理
             raise Exception(f"yt-dlp下载失败: {str(e)}")
 
+    async def _upload_gallery_by_url(self, images_list, video_info):
+        """
+        直接使用URL上传图集到Telegram（无需下载）
+        
+        Args:
+            images_list: 图片URL列表
+            video_info: 视频信息
+            
+        Raises:
+            Exception: 如果任何一张图片上传失败
+        """
+        from pyrogram.types import InputMediaPhoto
+        from asyncio import sleep
+        from pyrogram.errors import FloodWait
+        
+        LOGGER.info("Attempting direct URL upload for gallery")
+        
+        # 提取图片 URLs
+        image_urls = []
+        for img in images_list:
+            url = img.get("url") if isinstance(img, dict) else img
+            if url:
+                image_urls.append(url)
+        
+        if not image_urls:
+            raise Exception("No valid image URLs found")
+        
+        # 目的地
+        if Config.GALLERY_UPLOAD_TO_DUMP and Config.LEECH_DUMP_CHAT:
+            dest = Config.LEECH_DUMP_CHAT
+            if isinstance(dest, str) and dest.strip().lstrip("-").isdigit():
+                upload_dest = int(dest)
+            else:
+                upload_dest = dest
+        else:
+            upload_dest = self.message.chat.id
+        
+        # 更新状态
+        await edit_message(
+            self.status_msg,
+            f"⚡ 正在通过 URL 直传 {len(image_urls)} 张图片...\n"
+            f"📹 {video_info.get('title', '图集')}",
+        )
+        
+        # 分批上传（每批最多10张）
+        total_imgs = len(image_urls)
+        total_batches = (len(image_urls) + 9) // 10
+        upload_status_msg = await send_message(
+            self.message,
+            f"⬆️ 正在上传图集… 0/{total_imgs} (0/{total_batches} 组)"
+        )
+        
+        total_sent = 0
+        album_links = []
+        caption = self._build_caption(video_info)
+        batch_index = 0
+        
+        for start in range(0, len(image_urls), 10):
+            batch_urls = image_urls[start:start + 10]
+            media_group = []
+            
+            for idx, img_url in enumerate(batch_urls):
+                if batch_index == 0 and idx == 0:
+                    media_group.append(InputMediaPhoto(media=img_url, caption=caption))
+                else:
+                    media_group.append(InputMediaPhoto(media=img_url))
+            
+            LOGGER.info(f"Uploading URL media group batch {batch_index + 1} with {len(media_group)} images")
+            attempt = 0
+            while True:
+                try:
+                    msgs = await self.client.send_media_group(
+                        chat_id=upload_dest, media=media_group, reply_to_message_id=None
+                    )
+                    break
+                except FloodWait as f:
+                    wait_s = int(f.value) + 1
+                    LOGGER.warning(f"FloodWait while sending URL album batch {batch_index + 1}: wait {wait_s}s")
+                    await sleep(wait_s)
+                    attempt += 1
+                    if attempt >= 3:
+                        raise
+                except Exception as e:
+                    # 如果是媒体无效、URL过期等错误，直接抛出让外层回退
+                    LOGGER.error(f"URL upload failed for batch {batch_index + 1}: {e}")
+                    raise
+            
+            total_sent += len(msgs)
+            if msgs and hasattr(msgs[0], "link"):
+                album_links.append(msgs[0].link)
+            batch_index += 1
+            
+            # 更新上传进度
+            try:
+                await edit_message(
+                    upload_status_msg,
+                    f"⬆️ 正在上传图集… {total_sent}/{total_imgs} ({batch_index}/{total_batches} 组)"
+                )
+            except Exception:
+                pass
+            await sleep(1)
+        
+        # 删除状态消息
+        await delete_message(self.status_msg)
+        self.status_msg = None
+        
+        # 发送完成消息
+        from time import time
+        text = (
+            f"✅ <b>图集上传完成</b> ⚡ <i>URL直传模式</i>  📸 {total_sent}/{total_imgs}\n\n"
+            f"{video_info.get('title', '图集')}\n\n"
+            f"👤 {video_info.get('author', '未知作者')}"
+        )
+        if album_links:
+            if len(album_links) == 1:
+                text += f"\n🔗 <a href='{album_links[0]}'>查看相册</a>"
+            else:
+                links_str = "\n".join(
+                    [f"🔗 <a href='{lnk}'>相册 {i+1}</a>" for i, lnk in enumerate(album_links)]
+                )
+                text += f"\n{links_str}"
+        await send_message(self.message, text)
+        
+        # 删除上传进度提示
+        try:
+            await delete_message(upload_status_msg)
+        except Exception:
+            pass
+        
+        LOGGER.info(f"URL direct upload successful: {total_sent}/{total_imgs} images")
+
+    async def _upload_video_by_url(self, video_url, video_info):
+        """
+        直接使用URL上传视频到Telegram（无需下载）
+        
+        Args:
+            video_url: 视频直链URL
+            video_info: 视频信息字典
+            
+        Raises:
+            Exception: 如果上传失败
+        """
+        from asyncio import sleep
+        
+        LOGGER.info(f"Attempting direct URL upload for video: {video_url[:100]}...")
+        
+        # 更新状态
+        await edit_message(
+            self.status_msg,
+            f"⚡ 正在通过 URL 直传视频...\n"
+            f"📹 {video_info.get('title', '视频')}\n"
+            f"💡 <i>无需下载，直接上传</i>",
+        )
+        
+        # 目的地：使用与其他视频相同的逻辑
+        upload_dest = self.up_dest if hasattr(self, 'up_dest') and self.up_dest else self.message.chat.id
+        
+        # 如果 up_dest 是 h: 格式，提取实际的 chat_id
+        if isinstance(upload_dest, str) and upload_dest.startswith('h:'):
+            dest_str = upload_dest[2:]
+            if dest_str.strip().lstrip("-").isdigit():
+                upload_dest = int(dest_str)
+            else:
+                upload_dest = dest_str
+        
+        # 准备标题和缩略图
+        caption = self._build_caption(video_info)
+        thumb_url = video_info.get('cover_url') or video_info.get('cover')
+        
+        try:
+            # 尝试直接用URL上传视频
+            LOGGER.info(f"Sending video via URL to {upload_dest}")
+            
+            # 发送视频（使用URL）
+            msg = await self.client.send_video(
+                chat_id=upload_dest,
+                video=video_url,
+                caption=caption,
+                thumb=thumb_url if thumb_url else None,
+                supports_streaming=True,
+                disable_notification=False
+            )
+            
+            # 删除状态消息
+            await delete_message(self.status_msg)
+            self.status_msg = None
+            
+            # 发送成功消息
+            platform = video_info.get('platform', '未知平台')
+            text = (
+                f"✅ <b>视频上传完成</b> ⚡ <i>URL直传模式</i>\n\n"
+                f"📹 {video_info.get('title', '视频')}\n\n"
+                f"👤 {video_info.get('author', '未知作者')}\n"
+                f"🌐 平台: {platform}"
+            )
+            
+            if msg and hasattr(msg, 'link'):
+                text += f"\n🔗 <a href='{msg.link}'>查看视频</a>"
+            
+            await send_message(self.message, text)
+            
+            LOGGER.info(f"Video URL direct upload successful for {platform}")
+            
+        except Exception as e:
+            LOGGER.error(f"Video URL upload failed: {e}")
+            # 记录详细错误
+            import traceback
+            LOGGER.error(f"Video URL upload error traceback: {traceback.format_exc()}")
+            # 抛出异常让外层回退到下载模式
+            raise Exception(f"视频URL上传失败: {str(e)}")
+
     async def _handle_image_gallery(self, images_list, video_info):
         """
         处理图集下载和上传
         将图集作为媒体组（相册）上传到Telegram
+        
+        策略：先尝试直接用URL上传，失败后再下载上传
 
         Args:
             images_list: 图片URL列表 [{'url': 'https://...', 'live_photo_url': '...'}, ...]
@@ -339,6 +575,14 @@ class VideoLinkProcessor(TaskListener):
         try:
             LOGGER.info(f"Starting image gallery processing: {len(images_list)} images")
             
+            # 第一步：尝试直接用 URL 上传（零下载，极速）
+            try:
+                await self._upload_gallery_by_url(images_list, video_info)
+                return  # 成功则直接返回
+            except Exception as url_err:
+                LOGGER.warning(f"URL direct upload failed: {url_err}, falling back to download mode")
+            
+            # 第二步：回退到下载模式
             # 创建临时下载目录
             temp_dir = f"{DOWNLOAD_DIR}{self.mid}_gallery"
             await makedirs(temp_dir, exist_ok=True)
@@ -386,7 +630,7 @@ class VideoLinkProcessor(TaskListener):
                             cmd,
                             capture_output=True,
                             text=True,
-                            timeout=30
+                            timeout=60  # 增加超时时间到60秒，配合并发限制
                         )
                         
                         if result.returncode != 0:
@@ -455,16 +699,24 @@ class VideoLinkProcessor(TaskListener):
             # 更新状态
             await edit_message(
                 self.status_msg,
-                f"📥 正在并发下载 {len(images_list)} 张图片...\n"
+                f"📥 正在下载 {len(images_list)} 张图片...\n"
                 f"📹 {video_info.get('title', '图集')}",
             )
             
             # 从第一张图片开始下载的时间点
             start_ts = time()
 
-            # 并发下载所有图片
+            # 使用信号量控制并发数，避免CDN限流
             import asyncio
-            download_tasks = [download_single_image(idx, img_data) for idx, img_data in enumerate(images_list)]
+            max_concurrent = 5  # 最多同时下载5张图片
+            semaphore = asyncio.Semaphore(max_concurrent)
+            
+            async def download_with_semaphore(idx, img_data):
+                """带信号量控制的下载函数"""
+                async with semaphore:
+                    return await download_single_image(idx, img_data)
+            
+            download_tasks = [download_with_semaphore(idx, img_data) for idx, img_data in enumerate(images_list)]
             results = await asyncio.gather(*download_tasks, return_exceptions=False)
             
             # 过滤成功的下载，并按索引排序
@@ -640,11 +892,15 @@ class VideoLinkProcessor(TaskListener):
         if not filename:
             return "video"
         
+        # 移除换行符和多余空白
+        filename = str(filename).replace('\n', ' ').replace('\r', ' ')
+        # 合并多个空格为一个
+        filename = re.sub(r'\s+', ' ', filename)
         # 移除或替换非法字符
-        filename = re.sub(r'[<>:"/\\|?*]', "", str(filename))
-        # 限制长度
-        if len(filename) > 200:
-            filename = filename[:200]
+        filename = re.sub(r'[<>:"/\\|?*]', "", filename)
+        # 限制长度（考虑到扩展名，保留更多空间）
+        if len(filename) > 150:
+            filename = filename[:150]
         result = filename.strip()
         return result if result else "video"
 
