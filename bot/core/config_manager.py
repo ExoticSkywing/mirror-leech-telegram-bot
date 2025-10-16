@@ -72,6 +72,8 @@ class Config:
     PARSE_VIDEO_ENABLED = False
     PARSE_VIDEO_TIMEOUT = 30
     GALLERY_UPLOAD_TO_DUMP = True
+    # Telegraph instant upload for galleries
+    USE_TELEGRAPH_FOR_GALLERY = False
     # Membership gating for direct-link flow
     PARSE_VIDEO_CHANNEL_CHECK_ENABLED = False
     PARSE_VIDEO_REQUIRED_CHANNELS = []

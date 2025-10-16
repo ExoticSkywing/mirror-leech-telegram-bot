@@ -339,6 +339,27 @@ def add_handlers():
         CallbackQueryHandler(_pvcheck_cb, filters=_regex("^pvcheck$"))
     )
 
+    # Telegraph 批量下载回调处理器
+    from ..modules.video_parser import (
+        handle_batch_download_callback,
+        handle_confirm_batch_download,
+        handle_cancel_batch_download,
+        noop_callback
+    )
+    
+    TgClient.bot.add_handler(
+        CallbackQueryHandler(handle_batch_download_callback, filters=_regex("^batch_dl_"))
+    )
+    TgClient.bot.add_handler(
+        CallbackQueryHandler(handle_confirm_batch_download, filters=_regex("^confirm_batch_"))
+    )
+    TgClient.bot.add_handler(
+        CallbackQueryHandler(handle_cancel_batch_download, filters=_regex("^cancel_batch_"))
+    )
+    TgClient.bot.add_handler(
+        CallbackQueryHandler(noop_callback, filters=_regex("^noop$"))
+    )
+
     # Parse-Video直接链接处理器（无命令消息）
     # 必须放在最后，避免干扰现有命令
     TgClient.bot.add_handler(

@@ -610,7 +610,9 @@ class VideoLinkProcessor(TaskListener):
         处理图集下载和上传
         将图集作为媒体组（相册）上传到Telegram
         
-        策略：先尝试直接用URL上传，失败后再下载上传
+        支持两种模式：
+        1. Telegraph 秒传模式（推荐）：3-5秒创建在线画廊
+        2. Telegram 直接上传模式：下载后上传到群组
 
         Args:
             images_list: 图片URL列表 [{'url': 'https://...', 'live_photo_url': '...'}, ...]
@@ -620,12 +622,115 @@ class VideoLinkProcessor(TaskListener):
         try:
             LOGGER.info(f"Starting image gallery processing: {len(images_list)} images")
             
-            # 第一步：尝试直接用 URL 上传（零下载，极速）
-            try:
-                await self._upload_gallery_by_url(images_list, video_info)
-                return  # 成功则直接返回
-            except Exception as url_err:
-                LOGGER.warning(f"URL direct upload failed: {url_err}, falling back to download mode")
+            # 检查是否启用 Telegraph 秒传
+            if Config.USE_TELEGRAPH_FOR_GALLERY:
+                LOGGER.info("Using Telegraph instant upload mode")
+                await self._handle_gallery_telegraph_mode(images_list, video_info)
+                return
+            
+            # 原有逻辑：Telegram 直接上传模式
+            LOGGER.info("Using Telegram direct upload mode")
+            await self._handle_gallery_telegram_mode(images_list, video_info)
+            
+        except Exception as e:
+            LOGGER.error(f"Image gallery processing error: {e}")
+            import traceback
+            LOGGER.error(traceback.format_exc())
+            await edit_message(
+                self.status_msg,
+                f"❌ 图集处理失败\n📝 错误: {str(e)}"
+            )
+            raise
+
+
+    async def _handle_gallery_telegraph_mode(self, images_list, video_info):
+        """Telegraph 秒传模式：创建在线画廊"""
+        
+        start_time = time()
+        
+        # 更新状态
+        await edit_message(
+            self.status_msg,
+            f"⚡ 正在创建在线画廊...\n"
+            f"📸 共 {len(images_list)} 张图片\n"
+            f"📝 {video_info.get('title', '图集')[:50]}"
+        )
+        
+        try:
+            # 创建 Telegraph 画廊
+            gallery_url = await self._create_telegraph_gallery(images_list, video_info)
+            
+            elapsed = int(time() - start_time)
+            
+            # 构建按钮（先灰 30 秒，再启用“立即欣赏”）
+            from bot.helper.telegram_helper.button_build import ButtonMaker
+            buttons = ButtonMaker()
+            buttons.data_button("⏳ 立即欣赏(30s)", "noop")
+            buttons.data_button(
+                "📥 批量下载", 
+                f"batch_dl_{self.status_msg.id}_{len(images_list)}"
+            )
+            
+            # 发送汇总消息（附友好提示）
+            tip = "\n\n💡 提示：为确保更完美呈现，请等待 30 秒后再点击“立即欣赏”。"
+            summary_text = (
+                self._format_gallery_summary(
+                    images_list, video_info, elapsed, mode="telegraph"
+                ) + tip
+            )
+            
+            await edit_message(
+                self.status_msg,
+                summary_text,
+                buttons=buttons.build_menu(2)
+            )
+            
+            # 保存状态供批量下载/取消使用（带冻结截止时间）
+            freeze_until = time() + 30
+            await self._save_gallery_state(images_list, video_info, gallery_url, freeze_until)
+            
+            LOGGER.info(f"Telegraph gallery created successfully in {elapsed}s: {gallery_url}")
+
+            # 延迟 30 秒后启用“立即欣赏”
+            await sleep(30)
+            enable_btns = ButtonMaker()
+            enable_btns.url_button("🎨 立即欣赏", gallery_url)
+            enable_btns.data_button(
+                "📥 批量下载", 
+                f"batch_dl_{self.status_msg.id}_{len(images_list)}"
+            )
+            enabled_text = self._format_gallery_summary(
+                images_list, video_info, elapsed, mode="telegraph"
+            )
+            await edit_message(
+                self.status_msg,
+                enabled_text,
+                buttons=enable_btns.build_menu(2)
+            )
+            
+        except Exception as e:
+            LOGGER.error(f"Telegraph gallery creation failed: {e}")
+            import traceback
+            LOGGER.error(traceback.format_exc())
+            
+            # 失败时回退到 Telegram 上传模式
+            await edit_message(
+                self.status_msg,
+                f"⚠️ 在线画廊创建失败，切换到下载模式...\n📝 错误: {str(e)[:50]}"
+            )
+            await sleep(1)
+            await self._handle_gallery_telegram_mode(images_list, video_info)
+
+
+    async def _handle_gallery_telegram_mode(self, images_list, video_info):
+        """Telegram 直接上传模式（原有逻辑）"""
+        
+        # 第一步：尝试直接用 URL 上传（零下载，极速）
+        try:
+            await self._upload_gallery_by_url(images_list, video_info)
+            return  # 成功则直接返回
+        except Exception as url_err:
+            LOGGER.warning(f"URL direct upload failed: {url_err}, falling back to download mode")
             
             # 第二步：回退到下载模式
             # 创建临时下载目录
@@ -964,6 +1069,137 @@ class VideoLinkProcessor(TaskListener):
 
         return "\n".join(lines) if lines else "图集"
 
+    async def _create_telegraph_gallery(self, images_list, video_info):
+        """创建 Telegraph 画廊"""
+        from telegraph import Telegraph
+        
+        try:
+            # 创建匿名账号
+            telegraph = Telegraph()
+            telegraph.create_account(short_name='GalleryBot')
+            
+            # 构建 HTML 内容
+            html_content = self._build_gallery_html(images_list, video_info)
+            
+            # 创建页面
+            title = self._sanitize_filename(video_info.get('title', '图集'))[:50]
+            # 兼容 author 为字符串或字典的情况
+            author_data = video_info.get('author', 'Unknown')
+            if isinstance(author_data, dict):
+                author_name = author_data.get('name', 'Unknown')
+            else:
+                author_name = str(author_data) if author_data else 'Unknown'
+            
+            response = await sync_to_async(
+                telegraph.create_page,
+                title=title,
+                html_content=html_content,
+                author_name=author_name
+            )
+            
+            return response['url']
+            
+        except Exception as e:
+            LOGGER.error(f"Telegraph gallery creation error: {e}")
+            raise
+
+
+    def _build_gallery_html(self, images_list, video_info):
+        """构建 Telegraph 画廊 HTML"""
+        
+        title = video_info.get('title', '图集')
+        # 兼容 author 为字符串或字典的情况
+        author_data = video_info.get('author', 'Unknown')
+        if isinstance(author_data, dict):
+            author = author_data.get('name', 'Unknown')
+        else:
+            author = str(author_data) if author_data else 'Unknown'
+        
+        # HTML 头部（Telegraph 不允许 div/table 等布局标签，仅单列展示）
+        html = f'''
+        <h3>{title}</h3>
+        <p>👤 作者: {author}</p>
+        <p>📸 共 {len(images_list)} 张图片</p>
+        <hr>
+        '''
+        
+        # 添加图片
+        for idx, img_data in enumerate(images_list, 1):
+            img_url = img_data.get('url') if isinstance(img_data, dict) else img_data
+            
+            html += f'''
+            <figure>
+                <img src="{img_url}" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+                <figcaption>图片 {idx}/{len(images_list)}</figcaption>
+            </figure>
+            '''
+
+        return html
+
+
+    def _format_gallery_summary(self, images_list, video_info, elapsed, mode="telegraph"):
+        """格式化图集汇总消息"""
+        
+        title = video_info.get('title', '图集')
+        # 兼容 author 为字符串或字典的情况
+        author_data = video_info.get('author', '')
+        if isinstance(author_data, dict):
+            author = author_data.get('name', '')
+        else:
+            author = str(author_data) if author_data else ''
+        
+        if mode == "telegraph":
+            return (
+                f"✅ 图集已秒传完成！\n\n"
+                f"📸 共 {len(images_list)} 张图片\n"
+                f"📝 {title}\n"
+                f"👤 {author}\n"
+                f"⏱️ 耗时: {elapsed}秒\n\n"
+                f"━━━━━━━━━━━━━━━━"
+            )
+        else:
+            # 原有 Telegram 模式格式
+            return (
+                f"✅ 图集上传完成\n\n"
+                f"📸 {len(images_list)} 张图片\n"
+                f"📝 {title}\n"
+                f"👤 {author}\n"
+                f"⏱️ 耗时: {elapsed}秒"
+            )
+
+
+    # 内存缓存用于临时存储画廊状态
+    _gallery_cache = {}
+
+    async def _save_gallery_state(self, images_list, video_info, gallery_url, freeze_until=None):
+        """保存图集状态供批量下载使用"""
+        msg_id = self.status_msg.id
+        VideoLinkProcessor._gallery_cache[msg_id] = {
+            'images_list': images_list,
+            'video_info': video_info,
+            'gallery_url': gallery_url,
+            'timestamp': time(),
+            'freeze_until': freeze_until,
+            'user_id': self.message.from_user.id,
+            'chat_id': self.message.chat.id
+        }
+        LOGGER.info(f"Saved gallery state for message {msg_id}")
+
+
+    @classmethod
+    async def load_gallery_state(cls, msg_id):
+        """加载图集状态"""
+        return cls._gallery_cache.get(msg_id)
+
+
+    @classmethod
+    async def delete_gallery_state(cls, msg_id):
+        """删除图集状态"""
+        if msg_id in cls._gallery_cache:
+            del cls._gallery_cache[msg_id]
+            LOGGER.info(f"Deleted gallery state for message {msg_id}")
+
+
     def _sanitize_filename(self, filename):
         """清理文件名，移除非法字符并智能截取"""
         import re
@@ -1022,6 +1258,262 @@ class VideoLinkProcessor(TaskListener):
             LOGGER.info(f"Cleaned up temp directory: {directory}")
         except Exception as e:
             LOGGER.error(f"Error cleaning up temp directory: {e}")
+
+
+# ============ 批量下载回调处理 ============
+
+@new_task
+async def handle_batch_download_callback(client, query):
+    """处理批量下载按钮回调"""
+    
+    try:
+        # 解析回调数据: batch_dl_{msg_id}_{img_count}
+        callback_data = query.data
+        parts = callback_data.split('_')
+        
+        if len(parts) < 3:
+            await query.answer("❌ 无效的回调数据", show_alert=True)
+            return
+        
+        msg_id = int(parts[2])
+        img_count = int(parts[3]) if len(parts) > 3 else 0
+        
+        # 加载图集状态
+        state = await VideoLinkProcessor.load_gallery_state(msg_id)
+        
+        if not state:
+            await query.answer("❌ 图集状态已过期，请重新解析链接", show_alert=True)
+            return
+        
+        # 轻量提示（不弹窗），并在原消息内展示确认按钮
+        await query.answer("请确认是否继续批量下载")
+
+        # 创建确认按钮（编辑原消息，不再新发一条消息，避免混乱）
+        from bot.helper.telegram_helper.button_build import ButtonMaker
+        buttons = ButtonMaker()
+        buttons.data_button("✅ 确定下载", f"confirm_batch_{msg_id}")
+        buttons.data_button("❌ 取消", f"cancel_batch_{msg_id}")
+        
+        # 编辑原状态消息，展示确认按钮
+        from bot.helper.telegram_helper.message_utils import edit_message
+        await edit_message(
+            query.message,
+            (
+                f"⚠️ 批量下载提示\n\n"
+                f"批量下载 {img_count} 张图片到群组\n"
+                f"大约需要 1-2 分钟\n\n"
+                f"是否继续？"
+            ),
+            buttons=buttons.build_menu(2)
+        )
+        
+    except Exception as e:
+        LOGGER.error(f"Batch download callback error: {e}")
+        import traceback
+        LOGGER.error(traceback.format_exc())
+        await query.answer("❌ 处理失败，请重试", show_alert=True)
+
+
+@new_task
+async def handle_confirm_batch_download(client, query):
+    """确认批量下载"""
+    
+    try:
+        # 解析回调数据: confirm_batch_{msg_id}
+        callback_data = query.data
+        parts = callback_data.split('_')
+        
+        if len(parts) < 3:
+            await query.answer("❌ 无效的回调数据", show_alert=True)
+            return
+        
+        msg_id = int(parts[2])
+        
+        # 加载图集状态
+        state = await VideoLinkProcessor.load_gallery_state(msg_id)
+        
+        if not state:
+            await query.answer("❌ 图集状态已过期", show_alert=True)
+            return
+
+        # 先尽快回应一次，避免 QueryIdInvalid（后续不再调用 answer）
+        try:
+            await query.answer("已开始批量下载…", show_alert=False)
+        except Exception:
+            pass
+        
+        # 更新原消息：提示已开始下载，禁用再次下载
+        images_list = state['images_list']
+        video_info = state['video_info']
+        gallery_url = state['gallery_url']
+
+        from bot.helper.telegram_helper.button_build import ButtonMaker
+        from bot.helper.telegram_helper.message_utils import edit_message
+        buttons_info = ButtonMaker()
+        # 若仍在冻结期，继续显示灰色“立即欣赏(剩余s)”；否则启用
+        now_ts = time()
+        freeze_until = state.get('freeze_until') or 0
+        if now_ts < freeze_until:
+            remaining = int(max(0, freeze_until - now_ts))
+            buttons_info.data_button(f"⏳ 立即欣赏({remaining}s)", "noop")
+            tip_text = "\n\n💡 提示：为确保更完美呈现，请等待 30 秒后再点击“立即欣赏”。"
+        else:
+            buttons_info.url_button("🎨 立即欣赏", gallery_url)
+            tip_text = ""
+        buttons_info.data_button("⏳ 下载中…", "noop")
+        await edit_message(
+            query.message,
+            (
+                "📤 已开始批量下载到群组…\n\n"
+                f"📸 共 {len(images_list)} 张，稍候在下方查看进度" + tip_text
+            ),
+            buttons=buttons_info.build_menu(2)
+        )
+
+        # 创建新的进度消息
+        progress_msg = await query.message.reply(
+            f"📤 正在批量下载到群组...\n\n"
+            f"📸 进度: 0/{len(images_list)}"
+        )
+        
+        # 创建临时处理器执行下载
+        temp_processor = VideoLinkProcessor(
+            client, 
+            query.message.reply_to_message,
+            ""  # 不需要 URL
+        )
+        temp_processor.status_msg = progress_msg
+        
+        # 执行 Telegram 上传模式
+        await temp_processor._handle_gallery_telegram_mode(images_list, video_info)
+        
+        # 修改原消息：标记已下载，防止重复
+        buttons_done = ButtonMaker()
+        buttons_done.url_button("🎨 立即欣赏", gallery_url)
+        buttons_done.data_button("✅ 已下载", "noop")
+        await edit_message(
+            query.message,
+            (
+                "✅ 批量下载完成！\n\n"
+                f"📸 共上传 {len(images_list)} 张"
+            ),
+            buttons=buttons_done.build_menu(2)
+        )
+        
+        # 清理状态
+        await VideoLinkProcessor.delete_gallery_state(msg_id)
+        
+    except Exception as e:
+        LOGGER.error(f"Confirm batch download error: {e}")
+        import traceback
+        LOGGER.error(traceback.format_exc())
+        # 失败通过消息提示，不再调用 answer，避免 QueryIdInvalid
+        try:
+            from bot.helper.telegram_helper.message_utils import edit_message
+            await edit_message(query.message, "❌ 下载失败，请稍后重试")
+        except Exception:
+            pass
+
+
+@new_task
+async def handle_cancel_batch_download(client, query):
+    """取消批量下载"""
+    
+    try:
+        # 先尽快回应一次，避免 QueryIdInvalid
+        try:
+            await query.answer("已取消", show_alert=False)
+        except Exception:
+            pass
+
+        # 解析回调数据: cancel_batch_{msg_id}
+        data = query.data
+        parts = data.split('_')
+        if len(parts) < 3:
+            # 若无效，仅提示在消息里
+            from bot.helper.telegram_helper.message_utils import edit_message
+            await edit_message(query.message, "❌ 无效的回调数据")
+            return
+
+        msg_id = int(parts[2])
+
+        # 取回图集状态
+        state = await VideoLinkProcessor.load_gallery_state(msg_id)
+
+        # 默认提示
+        tip_text = "已取消批量下载"
+
+        from bot.helper.telegram_helper.button_build import ButtonMaker
+        from bot.helper.telegram_helper.message_utils import edit_message
+
+        if state:
+            images_list = state.get('images_list', [])
+            video_info = state.get('video_info', {})
+            gallery_url = state.get('gallery_url')
+
+            # 判断是否仍在冻结期内
+            now_ts = time()
+            freeze_until = state.get('freeze_until') or 0
+            still_freezing = now_ts < freeze_until
+
+            # 恢复按钮：冻结期内继续灰按钮；过期后启用
+            buttons = ButtonMaker()
+            if gallery_url:
+                if still_freezing:
+                    remaining = int(max(0, freeze_until - now_ts))
+                    buttons.data_button(f"⏳ 立即欣赏({remaining}s)", "noop")
+                else:
+                    buttons.url_button("🎨 立即欣赏", gallery_url)
+            buttons.data_button(
+                "📥 批量下载",
+                f"batch_dl_{msg_id}_{len(images_list) if images_list else 0}"
+            )
+
+            # 恢复摘要文本并附加已取消提示（并在冻结期内保留提示）
+            title = (video_info.get('title')
+                     if isinstance(video_info, dict) else str(video_info) if video_info else '图集')
+            # 兼容 author
+            author_data = video_info.get('author', '') if isinstance(video_info, dict) else ''
+            if isinstance(author_data, dict):
+                author = author_data.get('name', '')
+            else:
+                author = str(author_data) if author_data else ''
+
+            base_summary = (
+                f"✅ 图集已秒传完成！\n\n"
+                f"📸 共 {len(images_list) if images_list else 0} 张图片\n"
+                f"📝 {title}\n"
+                f"👤 {author}"
+            )
+            if still_freezing:
+                tip = "\n\n💡 提示：为确保更完美呈现，请等待 30 秒后再点击“立即欣赏”。"
+                summary = base_summary + tip + f"\n\n━━━━━━━━━━━━━━━━\n⚠️ {tip_text}"
+            else:
+                summary = base_summary + f"\n\n━━━━━━━━━━━━━━━━\n⚠️ {tip_text}"
+
+            await edit_message(query.message, summary, buttons=buttons.build_menu(2))
+        else:
+            # 状态丢失则仅提示
+            await edit_message(query.message, f"⚠️ {tip_text}")
+
+        # 已在开头答复，这里不再调用 answer
+        
+    except Exception as e:
+        LOGGER.error(f"Cancel batch download error: {e}")
+        try:
+            from bot.helper.telegram_helper.message_utils import edit_message
+            await edit_message(query.message, "❌ 操作失败")
+        except Exception:
+            pass
+
+
+@new_task
+async def noop_callback(_, query):
+    """吞掉无操作回调，立即消除“加载中…”提示"""
+    try:
+        await query.answer()
+    except Exception:
+        pass
 
 
 @new_task
