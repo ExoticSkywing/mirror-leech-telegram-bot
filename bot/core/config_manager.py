@@ -71,6 +71,8 @@ class Config:
     PARSE_VIDEO_API = ""
     PARSE_VIDEO_ENABLED = False
     PARSE_VIDEO_TIMEOUT = 30
+    PARSE_VIDEO_V2_API = "https://parsev2.1yo.cc"
+    PARSE_VIDEO_V2_ENABLED = True
     GALLERY_UPLOAD_TO_DUMP = True
     # Telegraph instant upload for galleries
     USE_TELEGRAPH_FOR_GALLERY = False

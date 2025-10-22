@@ -15,7 +15,7 @@ from bot.core.config_manager import Config
 from bot.helper.ext_utils.bot_utils import new_task, sync_to_async
 from bot.helper.ext_utils.files_utils import clean_target
 from bot.helper.ext_utils.url_utils import get_domain
-from bot.helper.parse_video_helper import parse_video_api, format_video_info
+from bot.helper.parse_video_helper import parse_video_api, parse_video_v2_api, format_video_info
 from bot.helper.listeners.task_listener import TaskListener
 from bot.helper.mirror_leech_utils.download_utils.yt_dlp_download import YoutubeDLHelper
 from bot.helper.ext_utils.membership_utils import check_membership
@@ -96,18 +96,44 @@ class VideoLinkProcessor(TaskListener):
                         return
             except Exception:
                 pass
-            # 策略1: 尝试Parse-Video解析
+            # 策略1: 尝试解析（部分平台优先使用新接口）
             video_direct_url = None
             video_info = {}
             images_list = []
 
             await edit_message(
                 self.status_msg,
-                f"📡 正在通过 Parse-Video 解析...\n" f"🔗 <code>{self.url[:60]}...</code>",
+                f"📡 正在解析链接...\n" f"🔗 <code>{self.url[:60]}...</code>",
             )
 
-            parse_result = await parse_video_api(self.url)
+            # 平台判断：B站、微博、皮皮虾、汽水音乐优先走 v2
+            domain = get_domain(self.url) or ""
+            url_lower = (self.url or "").lower()
+            prefer_v2_domains = {
+                "bilibili.com", "b23.tv",
+                "weibo.com", "weibo.cn", "m.weibo.cn", "video.weibo.com", "h5.video.weibo.com",
+                "pipix.com", "h5.pipix.com",
+                "music.douyin.com", "qishui.douyin.com",
+            }
+            prefer_v2 = (
+                (domain in prefer_v2_domains)
+                or domain.endswith("weibo.com")
+                or domain.endswith("weibo.cn")
+                or (domain.endswith("douyin.com") and "/music" in url_lower)
+            )
 
+            parse_result = None
+            if prefer_v2:
+                # 新接口优先
+                parse_result = await parse_video_v2_api(self.url)
+                if not parse_result:
+                    parse_result = await parse_video_api(self.url)
+            else:
+                # 旧接口优先
+                parse_result = await parse_video_api(self.url)
+                if not parse_result:
+                    parse_result = await parse_video_v2_api(self.url)
+                    
             if parse_result:
                 # Parse-Video解析成功
                 video_direct_url = parse_result.get("video_url")
