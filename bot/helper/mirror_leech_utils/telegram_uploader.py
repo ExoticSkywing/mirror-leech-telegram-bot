@@ -408,6 +408,13 @@ class TelegramUploader:
             elif is_audio:
                 key = "audios"
                 duration, artist, title = await get_media_info(self._up_path)
+                # Override with parsed metadata when provided (e.g., NetEase Music)
+                l_title = getattr(self._listener, 'audio_title', None)
+                l_artist = getattr(self._listener, 'audio_performer', None)
+                if isinstance(l_title, str) and l_title.strip():
+                    title = l_title.strip()
+                if isinstance(l_artist, str) and l_artist.strip():
+                    artist = l_artist.strip()
                 if self._listener.is_cancelled:
                     return
                 if thumb == "none":

@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any
 from bot import LOGGER
 from bot.core.config_manager import Config
 from bot.helper.ext_utils.url_utils import get_domain
+from urllib.parse import urlparse, parse_qs
 
 
 async def parse_video_api(url: str, timeout: int = 30) -> Optional[Dict[str, Any]]:
@@ -174,6 +175,8 @@ async def parse_video_v2_api(url: str, timeout: int = None) -> Optional[Dict[str
         endpoints = ["ppxia.php"]
     elif domain == "qishui.douyin.com" or (domain.endswith("douyin.com") and "/music" in url_lower):
         endpoints = ["dymusic.php"]
+    elif domain in {"music.163.com", "163cn.link"}:
+        endpoints = ["NETEASE_163"]
     else:
         # 无映射的平台不走 v2
         endpoints = []
@@ -184,6 +187,90 @@ async def parse_video_v2_api(url: str, timeout: int = None) -> Optional[Dict[str
         return None
 
     async def fetch_and_normalize(session, endpoint: str) -> Optional[Dict[str, Any]]:
+        # 特殊处理：网易云音乐通过 bugpk 接口解析
+        if endpoint == "NETEASE_163":
+            async def resolve_163_id(input_url: str) -> Optional[str]:
+                try:
+                    p = urlparse(input_url)
+                    # 1) query 里找 id
+                    q = parse_qs(p.query)
+                    if 'id' in q and q['id']:
+                        return q['id'][0]
+                    # 2) fragment 里找 id（#/song?...&id=xxx）
+                    if p.fragment:
+                        frag = p.fragment
+                        if '?' in frag:
+                            frag_q = parse_qs(frag.split('?', 1)[1])
+                            if 'id' in frag_q and frag_q['id']:
+                                return frag_q['id'][0]
+                    # 3) 163cn.link 短链，跟随重定向获取最终地址
+                    if p.netloc.endswith('163cn.link'):
+                        try:
+                            async with session.get(input_url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=to)) as r:
+                                final_url = str(r.url)
+                                p2 = urlparse(final_url)
+                                q2 = parse_qs(p2.query)
+                                if 'id' in q2 and q2['id']:
+                                    return q2['id'][0]
+                                if p2.fragment and '?' in p2.fragment:
+                                    frag_q2 = parse_qs(p2.fragment.split('?', 1)[1])
+                                    if 'id' in frag_q2 and frag_q2['id']:
+                                        return frag_q2['id'][0]
+                        except Exception:
+                            return None
+                except Exception:
+                    return None
+                return None
+
+            music_id = await resolve_163_id(url)
+            if not music_id:
+                LOGGER.warning("ParseV2 API NETEASE_163: failed to extract music id")
+                return None
+
+            try:
+                api_url_163 = "https://v.iarc.top/"
+                params = {
+                    'type': 'song',
+                    'id': music_id,
+                }
+                async with session.get(api_url_163, params=params, timeout=aiohttp.ClientTimeout(total=to)) as resp:
+                    if resp.status != 200:
+                        LOGGER.warning(f"ParseV2 API NETEASE_163 status {resp.status}")
+                        return None
+                    txt = await resp.text()
+                    s = txt.strip()
+                    # 该接口返回数组JSON
+                    try:
+                        rj = json.loads(s)
+                    except Exception:
+                        LOGGER.warning(f"ParseV2 API NETEASE_163 non-JSON body: {s[:200]}")
+                        return None
+                    if not isinstance(rj, list) or not rj:
+                        return None
+                    item = rj[0] if isinstance(rj[0], dict) else None
+                    if not item:
+                        return None
+                    audio_url = item.get('url')
+                    title = item.get('name') or ''
+                    author = item.get('artist') or ''
+                    cover = item.get('pic') or ''
+                    if not audio_url:
+                        return None
+                    normalized = {
+                        'video_url': audio_url,
+                        'title': title,
+                        'author': {'name': author},
+                        'cover_url': cover,
+                        'images': [],
+                        'platform': 'NetEaseMusic',
+                    }
+                    LOGGER.info(f"ParseV2 API NETEASE_163 success: {title}")
+                    return normalized
+            except Exception as e:
+                LOGGER.warning(f"ParseV2 API NETEASE_163 request failed: {e}")
+                return None
+
+        # 常规 parsev2.1yo.cc 端点处理
         api_url = f"{api_base.rstrip('/')}/{endpoint}"
         try:
             async with session.get(

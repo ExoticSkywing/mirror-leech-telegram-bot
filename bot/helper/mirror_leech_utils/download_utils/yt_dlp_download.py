@@ -22,6 +22,12 @@ class MyLogger:
     def debug(self, msg):
         # Hack to fix changing extension
         if not self._obj.is_playlist:
+            # Respect listener's name lock to avoid overriding custom names
+            try:
+                if getattr(self._listener, 'lock_name', False):
+                    return
+            except Exception:
+                pass
             if match := re_search(
                 r".Merger..Merging formats into..(.*?).$", msg
             ) or re_search(r".ExtractAudio..Destination..(.*?)$", msg):

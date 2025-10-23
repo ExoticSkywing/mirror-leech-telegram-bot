@@ -9,6 +9,7 @@ from aiofiles.os import path as aiopath, makedirs, remove as aioremove
 from os import path as ospath
 from pyrogram.types import InputMediaPhoto, InputMediaVideo
 from time import time
+from urllib.parse import urlparse
 
 from bot import LOGGER, DOWNLOAD_DIR, bot_loop
 from bot.core.config_manager import Config
@@ -114,6 +115,7 @@ class VideoLinkProcessor(TaskListener):
                 "weibo.com", "weibo.cn", "m.weibo.cn", "video.weibo.com", "h5.video.weibo.com",
                 "pipix.com", "h5.pipix.com",
                 "music.douyin.com", "qishui.douyin.com",
+                "music.163.com", "163cn.link",
             }
             prefer_v2 = (
                 (domain in prefer_v2_domains)
@@ -133,7 +135,7 @@ class VideoLinkProcessor(TaskListener):
                 parse_result = await parse_video_api(self.url)
                 if not parse_result:
                     parse_result = await parse_video_v2_api(self.url)
-                    
+
             if parse_result:
                 # Parse-Video解析成功
                 video_direct_url = parse_result.get("video_url")
@@ -143,6 +145,7 @@ class VideoLinkProcessor(TaskListener):
                     "title": parse_result.get("title", ""),
                     "author": parse_result.get("author", {}).get("name", ""),
                     "cover_url": parse_result.get("cover_url", ""),
+                    "platform": parse_result.get("platform", ""),
                 }
 
                 # 判断是视频还是图集
@@ -176,6 +179,17 @@ class VideoLinkProcessor(TaskListener):
                     )
 
                     LOGGER.info(f"Parse-Video success: {video_info['title']}")
+                    # 针对音频直链（如网易云）：设置音频元数据供上传阶段使用
+                    try:
+                        lower_url = (video_direct_url or '').lower()
+                        if video_info.get('platform') == 'NetEaseMusic' or lower_url.endswith('.mp3'):
+                            self.audio_title = video_info.get('title') or ''
+                            self.audio_performer = video_info.get('author') or ''
+                            # 若文件名无扩展名，强制设为 .mp3
+                            if self.name and not self.name.lower().endswith(('.mp3', '.m4a', '.flac', '.ogg', '.opus')):
+                                self.name = f"{self._sanitize_filename(self.name)}.mp3"
+                    except Exception:
+                        pass
                 else:
                     # 解析结果无效
                     raise ValueError("Parse-Video返回了空结果")
@@ -259,7 +273,20 @@ class VideoLinkProcessor(TaskListener):
             # 设置视频信息
             if video_info:
                 if video_info.get("title"):
-                    self.name = self._sanitize_filename(video_info["title"])
+                    # 基于解析标题设置自定义文件名
+                    base = self._sanitize_filename(video_info["title"])
+                    # 若为音频直链（如网易云/或URL以.mp3结尾），补充扩展名
+                    try:
+                        is_audio = False
+                        if isinstance(url, str) and url.lower().endswith((".mp3", ".m4a", ".flac", ".ogg", ".opus")):
+                            is_audio = True
+                        elif str(video_info.get("platform", "")).lower() in {"neteasemusic".lower()}:
+                            is_audio = True
+                        self.name = f"{base}.mp3" if is_audio and not base.lower().endswith((".mp3", ".m4a", ".flac", ".ogg", ".opus")) else base
+                        # 锁定自定义文件名，防止 yt-dlp 日志回调覆盖
+                    except Exception:
+                        self.name = base
+                    self.lock_name = True
                 if video_info.get("cover_url"):
                     self.thumb = video_info["cover_url"]
 
