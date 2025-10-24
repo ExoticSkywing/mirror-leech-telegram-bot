@@ -365,8 +365,9 @@ def add_handlers():
     TgClient.bot.add_handler(
         MessageHandler(
             handle_direct_message,
-            filters=(text | filters.caption) 
-            & ~command(""),
+            filters=(text | filters.caption)
+            & ~command("")
+            & (filters.private | CustomFilters.authorized),
         ),
         group=-1  # 较低优先级
     )
