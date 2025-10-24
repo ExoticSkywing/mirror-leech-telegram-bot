@@ -316,9 +316,13 @@ class TelegramUploader:
             )
             return
         LOGGER.info(f"Leech Completed: {self._listener.name}")
-        await self._listener.on_upload_complete(
-            None, self._msgs_dict, self._total_files, self._corrupted
-        )
+        try:
+            await self._listener.on_upload_complete(
+                None, self._msgs_dict, self._total_files, self._corrupted
+            )
+        except Exception as e:
+            LOGGER.error(f"Finalize failed: {e}")
+            await self._listener.on_upload_error(str(e))
         return
 
     @retry(

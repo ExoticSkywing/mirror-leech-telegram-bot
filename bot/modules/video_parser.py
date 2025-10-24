@@ -55,9 +55,32 @@ class VideoLinkProcessor(TaskListener):
         # 说明：TaskListener.before_start() 会优先使用 self.up_dest（若已设置）
         # 这里将其固定为当前消息所在的 chat，确保直发给用户/当前会话
         # 更改上传目的地：回归集中转存群，并优先 Hybrid（h: 前缀由上游解析）
-        # 说明：如果用户会话在该群具备所需权限则走用户会话，否则回退到 bot
-        if Config.LEECH_DUMP_CHAT:
-            self.up_dest = f"h:{Config.LEECH_DUMP_CHAT}"
+        # 说明：sudo 用户（SUDO_USERS）走私有目的地，其余走公有目的地
+        try:
+            sudo_ids = set()
+            if isinstance(Config.SUDO_USERS, str):
+                sudo_ids = {int(x) for x in Config.SUDO_USERS.split() if x.strip().lstrip('-').isdigit()}
+            elif isinstance(Config.SUDO_USERS, (list, tuple, set)):
+                sudo_ids = {int(x) for x in Config.SUDO_USERS}
+        except Exception:
+            sudo_ids = set()
+
+        is_sudo = False
+        try:
+            is_sudo = bool(self.message.from_user and self.message.from_user.id in sudo_ids)
+        except Exception:
+            is_sudo = False
+
+        dest_chat = None
+        if getattr(Config, 'ENABLE_SUDO_PRIVATE_DUMP', True) and is_sudo and getattr(Config, 'LEECH_PRIVATE_DUMP_CHAT', ''):
+            dest_chat = Config.LEECH_PRIVATE_DUMP_CHAT
+            self.private_dump = True
+        else:
+            dest_chat = Config.LEECH_DUMP_CHAT
+            self.private_dump = False
+
+        if dest_chat:
+            self.up_dest = f"h:{dest_chat}"
         else:
             self.up_dest = None
 

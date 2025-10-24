@@ -25,6 +25,9 @@ class Config:
     JD_EMAIL = ""
     JD_PASS = ""
     LEECH_DUMP_CHAT = ""
+    LEECH_PRIVATE_DUMP_CHAT = ""
+    ENABLE_SUDO_PRIVATE_DUMP = True
+    PRIVATE_DUMP_DELETE_PUBLIC_SUMMARY_SECS = 5
     LEECH_FILENAME_PREFIX = ""
     LEECH_SPLIT_SIZE = 2097152000
     MEDIA_GROUP = False
@@ -83,6 +86,7 @@ class Config:
     PARSE_VIDEO_CHECK_SCOPE = "direct_only"  # direct_only | all
     PARSE_VIDEO_EXEMPT_CONFIG_AUTH = True
     PARSE_VIDEO_MEMBERSHIP_CACHE_TTL = 60
+    NO_HIDE_CHATS = []
 
     @classmethod
     def _convert(cls, key: str, value):

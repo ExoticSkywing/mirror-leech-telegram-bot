@@ -1,5 +1,5 @@
 from aiofiles.os import path as aiopath, listdir, remove
-from asyncio import sleep, gather
+from asyncio import sleep, gather, create_task
 from html import escape
 from requests import utils as rutils
 
@@ -45,7 +45,9 @@ from ..telegram_helper.message_utils import (
     send_message,
     delete_status,
     update_status_message,
+    delete_message,
 )
+from ...core.mltb_client import TgClient
 
 
 class TaskListener(TaskConfig):
@@ -322,18 +324,82 @@ class TaskListener(TaskConfig):
             if mime_type != 0:
                 msg += f"\n<b>Corrupted Files: </b>{mime_type}"
             msg += f"\n<b>cc: </b>{self.tag}\n\n"
-            if not files:
-                await send_message(self.message, msg)
+            try:
+                chat = getattr(self.message, 'chat', None)
+                chat_type_name = getattr(getattr(chat, 'type', None), 'name', None)
+                is_groupish = chat_type_name in ["GROUP", "SUPERGROUP", "CHANNEL"]
+                # Public group/channel has a username; private groups don't
+                is_public = bool(getattr(chat, 'username', None)) if is_groupish else False
+                no_hide = set(str(x) for x in (getattr(Config, 'NO_HIDE_CHATS', []) or []))
+                hide_public = (
+                    getattr(self, 'private_dump', False)
+                    and is_public
+                    and str(self.message.chat.id) != str(Config.LEECH_PRIVATE_DUMP_CHAT)
+                    and str(self.message.chat.id) not in no_hide
+                )
+            except Exception:
+                hide_public = False
+
+            if hide_public:
+                note = await send_message(self.message, msg + "✅ 已完成，资源已投递到私有群")
+                # 向私有投递群发送完整汇总
+                try:
+                    dump_chat = int(getattr(Config, 'LEECH_PRIVATE_DUMP_CHAT', 0))
+                except Exception:
+                    dump_chat = 0
+                if dump_chat:
+                    try:
+                        if not files:
+                            await TgClient.bot.send_message(
+                                chat_id=dump_chat,
+                                text=msg,
+                                disable_web_page_preview=True,
+                            )
+                        else:
+                            fmsg = ""
+                            for index, (link, name) in enumerate(files.items(), start=1):
+                                fmsg += f"{index}. <a href='{link}'>{name}</a>\n"
+                                if len((msg + fmsg).encode()) > 3800:
+                                    await TgClient.bot.send_message(
+                                        chat_id=dump_chat,
+                                        text=msg + fmsg,
+                                        disable_web_page_preview=True,
+                                    )
+                                    await sleep(1)
+                                    fmsg = ""
+                            if fmsg:
+                                await TgClient.bot.send_message(
+                                    chat_id=dump_chat,
+                                    text=msg + fmsg,
+                                    disable_web_page_preview=True,
+                                )
+                    except Exception:
+                        pass
+                # 延时删除提示（非阻塞）
+                try:
+                    secs = getattr(Config, 'PRIVATE_DUMP_DELETE_PUBLIC_SUMMARY_SECS', 5)
+                except Exception:
+                    secs = 5
+                async def _del_later():
+                    try:
+                        await sleep(max(0, int(secs)))
+                        await delete_message(note)
+                    except Exception:
+                        pass
+                create_task(_del_later())
             else:
-                fmsg = ""
-                for index, (link, name) in enumerate(files.items(), start=1):
-                    fmsg += f"{index}. <a href='{link}'>{name}</a>\n"
-                    if len(fmsg.encode() + msg.encode()) > 4000:
+                if not files:
+                    await send_message(self.message, msg)
+                else:
+                    fmsg = ""
+                    for index, (link, name) in enumerate(files.items(), start=1):
+                        fmsg += f"{index}. <a href='{link}'>{name}</a>\n"
+                        if len(fmsg.encode() + msg.encode()) > 4000:
+                            await send_message(self.message, msg + fmsg)
+                            await sleep(1)
+                            fmsg = ""
+                    if fmsg != "":
                         await send_message(self.message, msg + fmsg)
-                        await sleep(1)
-                        fmsg = ""
-                if fmsg != "":
-                    await send_message(self.message, msg + fmsg)
         else:
             msg += f"\n\n<b>Type: </b>{mime_type}"
             if mime_type == "Folder":

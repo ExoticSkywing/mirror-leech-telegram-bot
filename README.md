@@ -8,7 +8,10 @@ programming in Python.
 
 <details>
   <summary><h1>Features</h1></summary>
-
+### 查看yt-dlp版本
+```bash
+docker-compose exec app bash -lc 'source mltbenv/bin/activate && yt-dlp --version'
+```
 <details>
   <summary><h5>QBittorrent</h5></summary>
 
