@@ -165,9 +165,14 @@ class YoutubeDLHelper:
                 outtmpl_ = "%(title,fulltitle,alt_title)s%(season_number& |)s%(season_number&S|)s%(season_number|)02d%(episode_number&E|)s%(episode_number|)02d%(height& |)s%(height|)s%(height&p|)s%(fps|)s%(fps&fps|)s%(tbr& |)s%(tbr|)d.%(ext)s"
                 realName = ydl.prepare_filename(result, outtmpl=outtmpl_)
                 ext = ospath.splitext(realName)[-1]
-                self._listener.name = (
-                    f"{self._listener.name}{ext}" if self._listener.name else realName
-                )
+                # 如果已提前设置了自定义文件名，则仅在它没有扩展名时追加提取到的扩展名，避免出现 .mp3.mp3
+                if self._listener.name:
+                    base, cur_ext = ospath.splitext(self._listener.name)
+                    self._listener.name = (
+                        self._listener.name if cur_ext else f"{self._listener.name}{ext}"
+                    )
+                else:
+                    self._listener.name = realName
                 if not self._ext:
                     self._ext = ext
 
