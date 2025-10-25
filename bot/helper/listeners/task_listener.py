@@ -338,9 +338,23 @@ class TaskListener(TaskConfig):
                 elif isinstance(up_dest, (int, str)):
                     ds = str(up_dest).split('|', 1)[0]
                     dest_chat = int(ds) if ds.strip().lstrip('-').isdigit() else ds
-                # 在群/频道且目标与当前不同，且不在白名单时隐藏
+                sudos = set()
+                try:
+                    if isinstance(Config.SUDO_USERS, str):
+                        sudos = {int(x) for x in Config.SUDO_USERS.split() if x.strip().lstrip('-').isdigit()}
+                    elif isinstance(Config.SUDO_USERS, (list, tuple, set)):
+                        sudos = {int(x) for x in Config.SUDO_USERS}
+                except Exception:
+                    sudos = set()
+                try:
+                    owner_match = int(getattr(Config, 'OWNER_ID', 0) or 0) == int(self.user_id)
+                except Exception:
+                    owner_match = False
+                runtime_sudo = bool(getattr(self, 'user_dict', {}).get('SUDO'))
+                is_admin = owner_match or (self.user_id in sudos) or runtime_sudo
                 hide_public = (
-                    is_groupish
+                    is_admin
+                    and is_groupish
                     and dest_chat
                     and str(self.message.chat.id) != str(dest_chat)
                     and str(self.message.chat.id) not in no_hide

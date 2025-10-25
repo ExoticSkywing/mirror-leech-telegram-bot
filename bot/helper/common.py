@@ -345,7 +345,8 @@ class TaskConfig:
                             owner_match = int(getattr(Config, 'OWNER_ID', 0) or 0) == int(uid)
                         except Exception:
                             owner_match = False
-                        return owner_match or (uid in sudos)
+                        runtime_sudo = bool(self.user_dict.get('SUDO'))
+                        return owner_match or (uid in sudos) or runtime_sudo
 
                     is_admin = _is_sudo(self.user_id)
                     if is_admin and getattr(Config, 'ENABLE_SUDO_PRIVATE_DUMP', True):

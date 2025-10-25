@@ -11,7 +11,7 @@ from pyrogram.types import InputMediaPhoto, InputMediaVideo
 from time import time
 from urllib.parse import urlparse
 
-from bot import LOGGER, DOWNLOAD_DIR, bot_loop
+from bot import LOGGER, DOWNLOAD_DIR, bot_loop, user_data
 from bot.core.config_manager import Config
 from bot.helper.ext_utils.bot_utils import new_task, sync_to_async
 from bot.helper.ext_utils.files_utils import clean_target
@@ -65,11 +65,22 @@ class VideoLinkProcessor(TaskListener):
         except Exception:
             sudo_ids = set()
 
-        is_sudo = False
         try:
-            is_sudo = bool(self.message.from_user and self.message.from_user.id in sudo_ids)
+            uid = self.message.from_user.id if self.message.from_user else None
         except Exception:
-            is_sudo = False
+            uid = None
+
+        try:
+            owner_match = bool(uid) and int(getattr(Config, 'OWNER_ID', 0) or 0) == int(uid)
+        except Exception:
+            owner_match = False
+
+        try:
+            runtime_sudo = bool(user_data.get(uid, {}).get('SUDO')) if uid else False
+        except Exception:
+            runtime_sudo = False
+
+        is_sudo = bool(uid and (owner_match or uid in sudo_ids or runtime_sudo))
 
         dest_chat = None
         # 管理员/超级用户：投递到私有汇总群 LEECH_DUMP_CHAT
