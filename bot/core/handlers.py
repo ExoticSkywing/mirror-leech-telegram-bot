@@ -174,7 +174,7 @@ def add_handlers():
         MessageHandler(
             leech,
             filters=command(BotCommands.LeechCommand, case_sensitive=True)
-            & CustomFilters.sudo,
+            & CustomFilters.authorized,
         )
     )
     TgClient.bot.add_handler(
@@ -313,7 +313,7 @@ def add_handlers():
         MessageHandler(
             ytdl_leech,
             filters=command(BotCommands.YtdlLeechCommand, case_sensitive=True)
-            & CustomFilters.sudo,
+            & CustomFilters.authorized,
         )
     )
     TgClient.bot.add_handler(
@@ -367,7 +367,7 @@ def add_handlers():
             handle_direct_message,
             filters=(text | filters.caption)
             & ~command("")
-            & (filters.private | CustomFilters.authorized),
+            & (filters.private | filters.group),
         ),
         group=-1  # 较低优先级
     )
