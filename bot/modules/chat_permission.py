@@ -49,6 +49,66 @@ async def authorize(_, message):
 
 
 @new_task
+async def auth_list(_, message):
+    """List authorized users and chats. Users are clickable tg://user links."""
+    # Collect authorized users from user_data
+    auth_users = []
+    for key, data in user_data.items():
+        try:
+            kid = int(key)
+        except Exception:
+            kid = key
+        if isinstance(kid, int) and kid > 0 and data.get("AUTH"):
+            auth_users.append(kid)
+
+    # Collect authorized chats/threads from config (auth_chats) and runtime (user_data)
+    from .. import auth_chats  # local import to avoid cycles
+    chats = {}
+    # from config/DB mirror
+    for cid, threads in auth_chats.items():
+        chats[cid] = list(set(threads)) if threads else []
+    # from user_data runtime AUTH entries
+    for key, data in user_data.items():
+        try:
+            cid = int(key)
+        except Exception:
+            cid = key
+        if isinstance(cid, int) and cid < 0 and data.get("AUTH"):
+            ths = data.get("thread_ids", []) or []
+            if cid in chats:
+                if chats[cid]:
+                    chats[cid] = list(sorted(set(chats[cid]) | set(ths)))
+                else:
+                    chats[cid] = list(sorted(set(ths)))
+            else:
+                chats[cid] = list(sorted(set(ths)))
+
+    # Build message
+    parts = []
+    if auth_users:
+        clickable = ", ".join(
+            [f"<a href='tg://user?id={uid}'>{uid}</a>" for uid in sorted(set(auth_users))]
+        )
+        parts.append(f"Authorized Users: [{clickable}]")
+    else:
+        parts.append("Authorized Users: []")
+
+    if chats:
+        # Format: chat_id: [thread_ids]
+        lines = []
+        for cid, ths in sorted(chats.items(), key=lambda x: x[0]):
+            if ths:
+                lines.append(f"{cid}: {ths}")
+            else:
+                lines.append(f"{cid}: []")
+        parts.append("Authorized Chats:\n" + "\n".join(lines))
+    else:
+        parts.append("Authorized Chats: {}")
+
+    await send_message(message, "\n\n".join(parts))
+
+
+@new_task
 async def unauthorize(_, message):
     msg = message.text.split()
     thread_id = None

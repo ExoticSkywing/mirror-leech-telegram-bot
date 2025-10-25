@@ -1,6 +1,6 @@
 from .bot_settings import send_bot_settings, edit_bot_settings
 from .cancel_task import cancel, cancel_multi, cancel_all_buttons, cancel_all_update
-from .chat_permission import authorize, unauthorize, add_sudo, remove_sudo
+from .chat_permission import authorize, unauthorize, add_sudo, remove_sudo, auth_list
 from .clone import clone_node
 from .exec import aioexecute, execute, clear
 from .file_selector import select, confirm_selection
@@ -45,6 +45,7 @@ __all__ = [
     "unauthorize",
     "add_sudo",
     "remove_sudo",
+    "auth_list",
     "clone_node",
     "aioexecute",
     "execute",

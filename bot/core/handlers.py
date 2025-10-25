@@ -294,6 +294,13 @@ def add_handlers():
     )
     TgClient.bot.add_handler(
         MessageHandler(
+            auth_list,
+            filters=command(BotCommands.AuthListCommand, case_sensitive=True)
+            & CustomFilters.sudo,
+        )
+    )
+    TgClient.bot.add_handler(
+        MessageHandler(
             send_user_settings,
             filters=command(BotCommands.UserSetCommand, case_sensitive=True)
             & CustomFilters.sudo,
