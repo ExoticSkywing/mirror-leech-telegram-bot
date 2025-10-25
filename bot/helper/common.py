@@ -319,15 +319,52 @@ class TaskConfig:
                 ) != self.get_config_path(self.up_dest):
                     raise ValueError("You must use the same config to clone!")
         else:
-            self.up_dest = (
-                self.up_dest
-                or self.user_dict.get("LEECH_DUMP_CHAT")
-                or (
-                    Config.LEECH_DUMP_CHAT
-                    if "LEECH_DUMP_CHAT" not in self.user_dict
-                    else None
-                )
-            )
+            # Determine leech destination with clear precedence:
+            # 1) Explicit -up argument (already in self.up_dest)
+            # 2) Per-user override: user_data[uid]["LEECH_DUMP_CHAT"]
+            # 3) Role defaults:
+            #    - SUDO/OWNER (if ENABLE_SUDO_PRIVATE_DUMP): LEECH_DUMP_CHAT (error if missing)
+            #    - Authorized non-SUDO: LEECH_PUBLIC_DUMP_CHAT (error if missing, no fallback)
+            if not self.up_dest:
+                user_override = self.user_dict.get("LEECH_DUMP_CHAT")
+                if user_override:
+                    self.up_dest = user_override
+                else:
+                    # Inline role check to avoid circular imports
+                    def _is_sudo(uid: int) -> bool:
+                        try:
+                            sudos = set()
+                            if isinstance(Config.SUDO_USERS, str):
+                                sudos = {int(x) for x in Config.SUDO_USERS.split() if x.strip().lstrip('-').isdigit()}
+                            elif isinstance(Config.SUDO_USERS, (list, tuple, set)):
+                                sudos = {int(x) for x in Config.SUDO_USERS}
+                        except Exception:
+                            sudos = set()
+                        owner_match = False
+                        try:
+                            owner_match = int(getattr(Config, 'OWNER_ID', 0) or 0) == int(uid)
+                        except Exception:
+                            owner_match = False
+                        return owner_match or (uid in sudos)
+
+                    is_admin = _is_sudo(self.user_id)
+                    if is_admin and getattr(Config, 'ENABLE_SUDO_PRIVATE_DUMP', True):
+                        if getattr(Config, 'LEECH_DUMP_CHAT', None):
+                            self.up_dest = Config.LEECH_DUMP_CHAT
+                        else:
+                            raise ValueError(
+                                "Private dump destination not configured (LEECH_DUMP_CHAT). "
+                                "Set it in config or use -up to specify a destination."
+                            )
+                    else:
+                        # Authorized non-SUDO users must go to public dump; do NOT fallback
+                        if getattr(Config, 'LEECH_PUBLIC_DUMP_CHAT', None):
+                            self.up_dest = Config.LEECH_PUBLIC_DUMP_CHAT
+                        else:
+                            raise ValueError(
+                                "Public dump destination not configured (LEECH_PUBLIC_DUMP_CHAT). "
+                                "Ask admin to set it, or use -up to specify a temporary destination."
+                            )
             self.hybrid_leech = TgClient.IS_PREMIUM_USER and (
                 self.user_dict.get("HYBRID_LEECH")
                 or Config.HYBRID_LEECH
