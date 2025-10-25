@@ -9,7 +9,7 @@ from bot.helper.ext_utils.membership_utils import check_membership
 from bot.helper.ext_utils.bot_utils import new_task
 from bot.helper.ext_utils.url_utils import extract_url_from_text
 from bot.helper.telegram_helper.filters import CustomFilters
-from bot.helper.telegram_helper.message_utils import send_message, edit_message
+from bot.helper.telegram_helper.message_utils import send_message, edit_message, auto_delete_message
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from bot.modules.video_parser import handle_video_link
 
@@ -70,8 +70,17 @@ async def handle_direct_message(client, message):
         await handle_video_link(client, message, url)
     
     else:
-        # 无链接：提示用户
-        await send_message(
+        # 无链接：仅在私聊中提示使用说明；群组内忽略，避免刷屏
+        try:
+            ctype = getattr(getattr(message, 'chat', None), 'type', None)
+            ctype_name = getattr(ctype, 'name', None)
+            is_groupish = ctype_name in ("GROUP", "SUPERGROUP", "CHANNEL")
+        except Exception:
+            is_groupish = False
+        if is_groupish:
+            return
+
+        reply = await send_message(
             message,
             "💡 <b>使用说明</b>\n\n"
             "直接发送视频分享链接即可下载\n\n"
@@ -87,4 +96,8 @@ async def handle_direct_message(client, message):
             "• /leech - 通用下载\n"
             "• /help - 查看所有命令"
         )
+        try:
+            await auto_delete_message(bot_message=reply, delay=20)
+        except Exception:
+            pass
 

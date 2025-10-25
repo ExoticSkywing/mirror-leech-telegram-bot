@@ -319,18 +319,11 @@ class TaskConfig:
                 ) != self.get_config_path(self.up_dest):
                     raise ValueError("You must use the same config to clone!")
         else:
-            # Determine leech destination with clear precedence:
-            # 1) Explicit -up argument (already in self.up_dest)
-            # 2) Per-user override: user_data[uid]["LEECH_DUMP_CHAT"]
-            # 3) Role defaults:
-            #    - SUDO/OWNER (if ENABLE_SUDO_PRIVATE_DUMP): LEECH_DUMP_CHAT (error if missing)
-            #    - Authorized non-SUDO: LEECH_PUBLIC_DUMP_CHAT (error if missing, no fallback)
             if not self.up_dest:
                 user_override = self.user_dict.get("LEECH_DUMP_CHAT")
                 if user_override:
                     self.up_dest = user_override
                 else:
-                    # Inline role check to avoid circular imports
                     def _is_sudo(uid: int) -> bool:
                         try:
                             sudos = set()
@@ -358,7 +351,6 @@ class TaskConfig:
                                 "Set it in config or use -up to specify a destination."
                             )
                     else:
-                        # Authorized non-SUDO users must go to public dump; do NOT fallback
                         if getattr(Config, 'LEECH_PUBLIC_DUMP_CHAT', None):
                             self.up_dest = Config.LEECH_PUBLIC_DUMP_CHAT
                         else:
