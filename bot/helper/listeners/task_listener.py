@@ -328,25 +328,40 @@ class TaskListener(TaskConfig):
                 chat = getattr(self.message, 'chat', None)
                 chat_type_name = getattr(getattr(chat, 'type', None), 'name', None)
                 is_groupish = chat_type_name in ["GROUP", "SUPERGROUP", "CHANNEL"]
-                # Public group/channel has a username; private groups don't
-                is_public = bool(getattr(chat, 'username', None)) if is_groupish else False
                 no_hide = set(str(x) for x in (getattr(Config, 'NO_HIDE_CHATS', []) or []))
+                # 解析上传目标 chat（来自 self.up_dest，可能是 h:<chat_id>[|thread]）
+                dest_chat = None
+                up_dest = getattr(self, 'up_dest', None)
+                if isinstance(up_dest, str) and up_dest.startswith('h:'):
+                    ds = up_dest[2:].split('|', 1)[0]
+                    dest_chat = int(ds) if ds.strip().lstrip('-').isdigit() else ds
+                elif isinstance(up_dest, (int, str)):
+                    ds = str(up_dest).split('|', 1)[0]
+                    dest_chat = int(ds) if ds.strip().lstrip('-').isdigit() else ds
+                # 在群/频道且目标与当前不同，且不在白名单时隐藏
                 hide_public = (
-                    getattr(self, 'private_dump', False)
-                    and is_public
-                    and str(self.message.chat.id) != str(Config.LEECH_PRIVATE_DUMP_CHAT)
+                    is_groupish
+                    and dest_chat
+                    and str(self.message.chat.id) != str(dest_chat)
                     and str(self.message.chat.id) not in no_hide
                 )
             except Exception:
                 hide_public = False
 
             if hide_public:
-                note = await send_message(self.message, msg + "✅ 已完成，资源已投递到私有群")
-                # 向私有投递群发送完整汇总
+                note = await send_message(self.message, msg + "✅ 已完成，资源已投递到汇总群")
+                # 向投递群发送完整汇总（解析自 self.up_dest）
                 try:
-                    dump_chat = int(getattr(Config, 'LEECH_PRIVATE_DUMP_CHAT', 0))
+                    dump_chat = None
+                    up_dest = getattr(self, 'up_dest', None)
+                    if isinstance(up_dest, str) and up_dest.startswith('h:'):
+                        ds = up_dest[2:].split('|', 1)[0]
+                        dump_chat = int(ds) if ds.strip().lstrip('-').isdigit() else ds
+                    elif isinstance(up_dest, (int, str)):
+                        ds = str(up_dest).split('|', 1)[0]
+                        dump_chat = int(ds) if ds.strip().lstrip('-').isdigit() else ds
                 except Exception:
-                    dump_chat = 0
+                    dump_chat = None
                 if dump_chat:
                     try:
                         if not files:

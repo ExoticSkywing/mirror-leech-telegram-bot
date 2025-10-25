@@ -72,11 +72,13 @@ class VideoLinkProcessor(TaskListener):
             is_sudo = False
 
         dest_chat = None
-        if getattr(Config, 'ENABLE_SUDO_PRIVATE_DUMP', True) and is_sudo and getattr(Config, 'LEECH_PRIVATE_DUMP_CHAT', ''):
-            dest_chat = Config.LEECH_PRIVATE_DUMP_CHAT
+        # 管理员/超级用户：投递到私有汇总群 LEECH_DUMP_CHAT
+        if getattr(Config, 'ENABLE_SUDO_PRIVATE_DUMP', True) and is_sudo and getattr(Config, 'LEECH_DUMP_CHAT', ''):
+            dest_chat = Config.LEECH_DUMP_CHAT
             self.private_dump = True
         else:
-            dest_chat = Config.LEECH_DUMP_CHAT
+            # 普通用户：投递到公共汇总群 LEECH_PUBLIC_DUMP_CHAT（若未配置则回退到 LEECH_DUMP_CHAT）
+            dest_chat = getattr(Config, 'LEECH_PUBLIC_DUMP_CHAT', '') or getattr(Config, 'LEECH_DUMP_CHAT', '')
             self.private_dump = False
 
         if dest_chat:
@@ -454,15 +456,14 @@ class VideoLinkProcessor(TaskListener):
         if not image_urls:
             raise Exception("No valid image URLs found")
         
-        # 目的地
-        if Config.GALLERY_UPLOAD_TO_DUMP and Config.LEECH_DUMP_CHAT:
-            dest = Config.LEECH_DUMP_CHAT
-            if isinstance(dest, str) and dest.strip().lstrip("-").isdigit():
-                upload_dest = int(dest)
+        # 目的地：统一沿用 self.up_dest 路由
+        upload_dest = self.up_dest if hasattr(self, 'up_dest') and self.up_dest else self.message.chat.id
+        if isinstance(upload_dest, str) and upload_dest.startswith('h:'):
+            dest_str = upload_dest[2:]
+            if dest_str.strip().lstrip('-').isdigit():
+                upload_dest = int(dest_str)
             else:
-                upload_dest = dest
-        else:
-            upload_dest = self.message.chat.id
+                upload_dest = dest_str
         
         # 分批上传（串行，每批最多10张，固定延迟避免FloodWait）
         from ..helper.telegram_helper.button_build import ButtonMaker
