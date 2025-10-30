@@ -80,6 +80,8 @@ class Config:
     GALLERY_UPLOAD_TO_DUMP = True
     # Telegraph instant upload for galleries
     USE_TELEGRAPH_FOR_GALLERY = False
+    # Worker Gallery Service
+    WORKER_GALLERY_API = ""
     # Membership gating for direct-link flow
     PARSE_VIDEO_CHANNEL_CHECK_ENABLED = False
     PARSE_VIDEO_REQUIRED_CHANNELS = []

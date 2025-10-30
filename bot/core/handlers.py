@@ -346,11 +346,12 @@ def add_handlers():
         CallbackQueryHandler(_pvcheck_cb, filters=_regex("^pvcheck$"))
     )
 
-    # Telegraph 批量下载回调处理器
+    # Telegraph 批量下载回调处理器 & Worker Gallery 手动上传
     from ..modules.video_parser import (
         handle_batch_download_callback,
         handle_confirm_batch_download,
         handle_cancel_batch_download,
+        handle_manual_tg_upload,
         noop_callback
     )
     
@@ -362,6 +363,9 @@ def add_handlers():
     )
     TgClient.bot.add_handler(
         CallbackQueryHandler(handle_cancel_batch_download, filters=_regex("^cancel_batch_"))
+    )
+    TgClient.bot.add_handler(
+        CallbackQueryHandler(handle_manual_tg_upload, filters=_regex("^manual_tg_upload_"))
     )
     TgClient.bot.add_handler(
         CallbackQueryHandler(noop_callback, filters=_regex("^noop$"))

@@ -732,39 +732,102 @@ class VideoLinkProcessor(TaskListener):
 
 
     async def _handle_gallery_telegraph_mode(self, images_list, video_info):
-        """Telegraph 秒传模式：创建在线画廊"""
+        """Worker 画廊模式：下载 → Telegraph图床 → Worker画廊"""
         
         start_time = time()
         
         # 更新状态
         await edit_message(
             self.status_msg,
-            f"⚡ 正在创建在线画廊...\n"
+            f"📥 正在下载图集...\n"
             f"📸 共 {len(images_list)} 张图片\n"
             f"📝 {video_info.get('title', '图集')[:50]}"
         )
         
         try:
-            # 创建 Telegraph 画廊
-            gallery_url = await self._create_telegraph_gallery(images_list, video_info)
+            # 第1步：下载图片到服务器
+            downloaded_images = await self._download_images_for_gallery(images_list, video_info)
             
-            elapsed = int(time() - start_time)
+            if not downloaded_images:
+                raise Exception("未能下载任何图片")
             
-            # 构建按钮（先灰 30 秒，再启用“立即欣赏”）
-            from bot.helper.telegram_helper.button_build import ButtonMaker
-            buttons = ButtonMaker()
-            buttons.data_button("⏳ 立即欣赏(30s)", "noop")
-            buttons.data_button(
-                "📥 批量下载", 
-                f"batch_dl_{self.status_msg.id}_{len(images_list)}"
+            LOGGER.info(f"Downloaded {len(downloaded_images)} images successfully")
+            
+            # 第2步：上传到 Catbox 图床
+            await edit_message(
+                self.status_msg,
+                f"📤 Catbox正在进食...\n"
+                f"📸 已下载 {len(downloaded_images)}/{len(images_list)} 张\n"
+                f"⏳ 请稍候..."
             )
             
-            # 发送汇总消息（附友好提示）
-            tip = "\n\n💡 提示：为确保更完美呈现，请等待 30 秒后再点击“立即欣赏”。"
+            catbox_urls = await self._upload_to_catbox_image_host(downloaded_images)
+            
+            if not catbox_urls:
+                raise Exception("上传图床失败")
+            
+            LOGGER.info(f"Uploaded {len(catbox_urls)} images to Catbox")
+            
+            # 第3步：调用 Worker API 创建画廊
+            await edit_message(
+                self.status_msg,
+                f"🎨 正在创建画廊...\n"
+                f"📸 已上传 {len(catbox_urls)} 张图片\n"
+                f"⚡ 即将完成..."
+            )
+            
+            worker_response = await self._create_worker_gallery(catbox_urls, video_info)
+            
+            if not worker_response.get('success'):
+                error_msg = worker_response.get('message', '未知错误')
+                
+                # 如果是配额超限
+                if worker_response.get('error') == 'QUOTA_EXCEEDED':
+                    await edit_message(
+                        self.status_msg,
+                        f"⚠️ 今日画廊创建已达上限\n\n"
+                        f"💡 请明天再试，或点击下方按钮手动上传到群组"
+                    )
+                    # 显示手动上传按钮
+                    from bot.helper.telegram_helper.button_build import ButtonMaker
+                    buttons = ButtonMaker()
+                    buttons.data_button(
+                        "📥 批量下载", 
+                        f"manual_tg_upload_{self.status_msg.id}"
+                    )
+                    await edit_message(self.status_msg, buttons=buttons.build_menu(1))
+                    # 保存状态供手动上传使用
+                    await self._save_gallery_state_for_manual_upload(images_list, video_info)
+                    return
+                
+                raise Exception(f"Worker 画廊创建失败: {error_msg}")
+            
+            gallery_url = worker_response['gallery_url']
+            elapsed = int(time() - start_time)
+            
+            LOGGER.info(f"Worker gallery created successfully in {elapsed}s: {gallery_url}")
+            
+            # 第4步：展示结果（两个按钮）
+            from bot.helper.telegram_helper.button_build import ButtonMaker
+            buttons = ButtonMaker()
+            buttons.url_button("🎨 在线画廊", gallery_url)
+            buttons.data_button(
+                "📥 上传到群组", 
+                f"manual_tg_upload_{self.status_msg.id}"
+            )
+            
             summary_text = (
-                self._format_gallery_summary(
-                    images_list, video_info, elapsed, mode="telegraph"
-                ) + tip
+                f"✅ <b>图集已创建！</b>\n\n"
+                f"📸 共 {len(catbox_urls)} 张图片\n"
+                f"📹 {video_info.get('title', '图集')}\n"
+                f"👤 {video_info.get('author', '未知')}\n"
+                f"⏱️ 耗时: {elapsed}秒\n\n"
+                f"🌐 <b>在线画廊</b>：点击下方按钮查看\n"
+                f"💡 国内外均可访问 · 有效期30天\n\n"
+                f"📝 如需批量下载，点击右侧按钮\n\n"
+                f"🔗 <b>分享链接</b>：\n"
+                f"<code>{gallery_url}</code>\n"
+                f"💬 点击链接即可复制，分享给好友一起欣赏！"
             )
             
             await edit_message(
@@ -773,40 +836,26 @@ class VideoLinkProcessor(TaskListener):
                 buttons=buttons.build_menu(2)
             )
             
-            # 保存状态供批量下载/取消使用（带冻结截止时间）
-            freeze_until = time() + 30
-            await self._save_gallery_state(images_list, video_info, gallery_url, freeze_until)
+            # 保存状态供手动上传使用
+            await self._save_gallery_state_for_manual_upload(images_list, video_info)
             
-            LOGGER.info(f"Telegraph gallery created successfully in {elapsed}s: {gallery_url}")
-
-            # 延迟 30 秒后启用“立即欣赏”
-            await sleep(30)
-            enable_btns = ButtonMaker()
-            enable_btns.url_button("🎨 立即欣赏", gallery_url)
-            enable_btns.data_button(
-                "📥 批量下载", 
-                f"batch_dl_{self.status_msg.id}_{len(images_list)}"
-            )
-            enabled_text = self._format_gallery_summary(
-                images_list, video_info, elapsed, mode="telegraph"
-            )
-            await edit_message(
-                self.status_msg,
-                enabled_text,
-                buttons=enable_btns.build_menu(2)
-            )
+            # 清理临时文件
+            await self._cleanup_downloaded_images(downloaded_images)
             
         except Exception as e:
-            LOGGER.error(f"Telegraph gallery creation failed: {e}")
+            LOGGER.error(f"Gallery creation failed: {e}")
             import traceback
             LOGGER.error(traceback.format_exc())
             
-            # 失败时回退到 Telegram 上传模式
             await edit_message(
                 self.status_msg,
-                f"⚠️ 在线画廊创建失败，切换到下载模式...\n📝 错误: {str(e)[:50]}"
+                f"❌ <b>画廊创建失败</b>\n\n"
+                f"📝 错误: <code>{str(e)[:100]}</code>\n\n"
+                f"💡 正在上传到群组..."
             )
             await sleep(1)
+            
+            # 降级：上传到 Telegram 群组
             await self._handle_gallery_telegram_mode(images_list, video_info)
 
 
@@ -1339,6 +1388,236 @@ class VideoLinkProcessor(TaskListener):
         result = filename.strip()
         return result if result else "video"
 
+    async def _download_images_for_gallery(self, images_list, video_info):
+        """下载图片到服务器（复用原有逻辑）"""
+        temp_dir = f"{DOWNLOAD_DIR}{self.mid}_gallery"
+        await makedirs(temp_dir, exist_ok=True)
+        LOGGER.info(f"Created temp directory: {temp_dir}")
+
+        downloaded_images = []
+        import subprocess
+        
+        # 使用信号量控制并发数
+        import asyncio
+        max_concurrent = 5
+        semaphore = asyncio.Semaphore(max_concurrent)
+        
+        async def download_single_image(idx, image_data):
+            """使用yt-dlp下载单张图片"""
+            if self.is_cancelled:
+                return None
+
+            image_url = image_data.get("url") if isinstance(image_data, dict) else image_data
+            if not image_url:
+                return None
+                
+            async with semaphore:
+                try:
+                    final_path = ospath.join(temp_dir, f"image_{idx:03d}.jpg")
+                    temp_output = ospath.join(temp_dir, f'temp_{idx:03d}')
+                    
+                    cmd = [
+                        'yt-dlp',
+                        '--no-warnings',
+                        '--quiet',
+                        '-o', f'{temp_output}.%(ext)s',
+                        image_url
+                    ]
+                    
+                    result = await sync_to_async(
+                        subprocess.run,
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=60
+                    )
+                    
+                    if result.returncode != 0:
+                        LOGGER.error(f"Image {idx + 1}: yt-dlp failed")
+                        return None
+                    
+                    import glob
+                    downloaded_files = glob.glob(f'{temp_output}.*')
+                    
+                    if not downloaded_files:
+                        return None
+                    
+                    temp_file = downloaded_files[0]
+                    
+                    # 转换为JPG
+                    def convert_image():
+                        from PIL import Image
+                        img = Image.open(temp_file)
+                        if img.mode in ('RGBA', 'LA', 'P'):
+                            background = Image.new('RGB', img.size, (255, 255, 255))
+                            if img.mode == 'P':
+                                img = img.convert('RGBA')
+                            background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+                            img = background
+                        elif img.mode != 'RGB':
+                            img = img.convert('RGB')
+                        img.save(final_path, 'JPEG', quality=95)
+                    
+                    await sync_to_async(convert_image)
+                    
+                    try:
+                        await aioremove(temp_file)
+                    except:
+                        pass
+                    
+                    LOGGER.info(f"Downloaded image {idx + 1}/{len(images_list)}")
+                    return final_path
+                    
+                except Exception as e:
+                    LOGGER.error(f"Error downloading image {idx + 1}: {e}")
+                    return None
+        
+        download_tasks = [download_single_image(idx, img_data) for idx, img_data in enumerate(images_list)]
+        results = await asyncio.gather(*download_tasks, return_exceptions=False)
+        
+        downloaded_images = [r for r in results if r is not None]
+        
+        LOGGER.info(f"Successfully downloaded {len(downloaded_images)}/{len(images_list)} images")
+        
+        return downloaded_images
+
+    async def _upload_to_catbox_image_host(self, image_paths):
+        """上传图片到 Catbox 图床（免费、永久、无限制）"""
+        import aiohttp
+        
+        catbox_urls = []
+        
+        for idx, img_path in enumerate(image_paths):
+            try:
+                # 读取图片数据
+                async with aioopen(img_path, 'rb') as f:
+                    img_data = await f.read()
+                
+                # Catbox.moe 上传 API
+                async with aiohttp.ClientSession() as session:
+                    form_data = aiohttp.FormData()
+                    form_data.add_field('reqtype', 'fileupload')
+                    form_data.add_field('userhash', '')  # 匿名上传
+                    form_data.add_field(
+                        'fileToUpload',
+                        img_data,
+                        filename='image.jpg',
+                        content_type='image/jpeg'
+                    )
+                    
+                    try:
+                        async with session.post(
+                            'https://catbox.moe/user/api.php',
+                            data=form_data,
+                            timeout=aiohttp.ClientTimeout(total=60)
+                        ) as resp:
+                            if resp.status == 200:
+                                catbox_url = await resp.text()
+                                catbox_url = catbox_url.strip()
+                                
+                                # 验证返回的是有效URL
+                                if catbox_url.startswith('https://files.catbox.moe/'):
+                                    catbox_urls.append(catbox_url)
+                                    LOGGER.info(f"Uploaded image {idx + 1}/{len(image_paths)} to Catbox: {catbox_url}")
+                                else:
+                                    LOGGER.error(f"Catbox returned invalid URL for image {idx + 1}: {catbox_url[:100]}")
+                            else:
+                                resp_text = await resp.text()
+                                LOGGER.error(f"Catbox upload failed for image {idx + 1}: HTTP {resp.status}, Response: {resp_text[:200]}")
+                    except Exception as upload_error:
+                        LOGGER.error(f"Catbox upload request error for image {idx + 1}: {upload_error}")
+                
+                # 避免限流，延迟一下
+                await sleep(0.5)
+                
+            except Exception as e:
+                LOGGER.error(f"Error processing image {idx + 1} for Catbox: {e}")
+                import traceback
+                LOGGER.error(traceback.format_exc())
+                continue
+        
+        LOGGER.info(f"Successfully uploaded {len(catbox_urls)}/{len(image_paths)} images to Catbox")
+        
+        return catbox_urls
+
+    async def _create_worker_gallery(self, image_urls, video_info):
+        """调用 Worker API 创建画廊"""
+        import aiohttp
+        from bot.core.config_manager import Config
+        
+        worker_api = getattr(Config, 'WORKER_GALLERY_API', '')
+        
+        if not worker_api:
+            raise Exception("WORKER_GALLERY_API 未配置")
+        
+        api_url = f"{worker_api.rstrip('/')}/api/create-gallery"
+        
+        payload = {
+            'title': video_info.get('title', '图集'),
+            'author': video_info.get('author', '未知'),
+            'images': image_urls
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    api_url,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
+                    result = await response.json()
+                    return result
+        except Exception as e:
+            LOGGER.error(f"Worker API call failed: {e}")
+            return {
+                'success': False,
+                'error': 'API_ERROR',
+                'message': str(e)
+            }
+
+    # 状态缓存（用于手动上传）
+    _manual_upload_cache = {}
+
+    async def _save_gallery_state_for_manual_upload(self, images_list, video_info):
+        """保存图集状态供手动上传使用"""
+        msg_id = self.status_msg.id
+        VideoLinkProcessor._manual_upload_cache[msg_id] = {
+            'images_list': images_list,
+            'video_info': video_info,
+            'timestamp': time(),
+            'user_id': self.message.from_user.id,
+            'chat_id': self.message.chat.id
+        }
+        LOGGER.info(f"Saved manual upload state for message {msg_id}")
+
+    @classmethod
+    async def load_manual_upload_state(cls, msg_id):
+        """加载手动上传状态"""
+        return cls._manual_upload_cache.get(msg_id)
+
+    @classmethod
+    async def delete_manual_upload_state(cls, msg_id):
+        """删除手动上传状态"""
+        if msg_id in cls._manual_upload_cache:
+            del cls._manual_upload_cache[msg_id]
+            LOGGER.info(f"Deleted manual upload state for message {msg_id}")
+
+    async def _cleanup_downloaded_images(self, image_paths):
+        """清理下载的图片文件"""
+        if not image_paths:
+            return
+        
+        try:
+            # 获取目录路径
+            first_path = image_paths[0]
+            temp_dir = ospath.dirname(first_path)
+            
+            if await aiopath.exists(temp_dir):
+                await clean_target(temp_dir)
+                LOGGER.info(f"Cleaned up temp directory: {temp_dir}")
+        except Exception as e:
+            LOGGER.error(f"Error cleaning up downloaded images: {e}")
+
     async def _cleanup_temp_files(self, directory):
         """清理临时文件"""
         try:
@@ -1597,11 +1876,73 @@ async def handle_cancel_batch_download(client, query):
 
 @new_task
 async def noop_callback(_, query):
-    """吞掉无操作回调，立即消除“加载中…”提示"""
+    """吞掉无操作回调，立即消除"加载中…"提示"""
     try:
         await query.answer()
     except Exception:
         pass
+
+
+@new_task
+async def handle_manual_tg_upload(client, query):
+    """处理手动上传到TG群组按钮"""
+    try:
+        # 解析回调数据: manual_tg_upload_{msg_id}
+        callback_data = query.data
+        parts = callback_data.split('_')
+        
+        if len(parts) < 4:
+            await query.answer("❌ 无效的回调数据", show_alert=True)
+            return
+        
+        msg_id = int(parts[3])
+        
+        # 加载图集状态
+        state = await VideoLinkProcessor.load_manual_upload_state(msg_id)
+        
+        if not state:
+            await query.answer("❌ 图集状态已过期，请重新解析链接", show_alert=True)
+            return
+        
+        # 立即回应
+        await query.answer("开始上传到群组...", show_alert=False)
+        
+        # 更新消息状态
+        from bot.helper.telegram_helper.message_utils import edit_message
+        await edit_message(
+            query.message,
+            f"📤 正在上传到群组...\n\n"
+            f"📸 共 {len(state['images_list'])} 张图片\n"
+            f"⏳ 请稍候..."
+        )
+        
+        # 创建临时处理器执行上传
+        temp_processor = VideoLinkProcessor(
+            client,
+            query.message.reply_to_message or query.message,
+            ""  # 不需要URL
+        )
+        temp_processor.status_msg = query.message
+        temp_processor.message = query.message.reply_to_message or query.message
+        
+        # 执行 Telegram 上传模式
+        await temp_processor._handle_gallery_telegram_mode(
+            state['images_list'],
+            state['video_info']
+        )
+        
+        # 清理状态
+        await VideoLinkProcessor.delete_manual_upload_state(msg_id)
+        
+    except Exception as e:
+        LOGGER.error(f"Manual TG upload error: {e}")
+        import traceback
+        LOGGER.error(traceback.format_exc())
+        try:
+            from bot.helper.telegram_helper.message_utils import edit_message
+            await edit_message(query.message, f"❌ 上传失败：{str(e)[:100]}")
+        except Exception:
+            pass
 
 
 @new_task
