@@ -82,6 +82,7 @@ class Config:
     USE_TELEGRAPH_FOR_GALLERY = False
     # Worker Gallery Service
     WORKER_GALLERY_API = ""
+    USE_GALLERY_CACHE = True
     # Membership gating for direct-link flow
     PARSE_VIDEO_CHANNEL_CHECK_ENABLED = False
     PARSE_VIDEO_REQUIRED_CHANNELS = []

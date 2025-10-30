@@ -112,3 +112,4 @@ SEARCH_PLUGINS = [
 # Worker Gallery Service Configuration
 WORKER_GALLERY_API = ""  # Worker Gallery API地址（部署后填入）
 USE_TELEGRAPH_FOR_GALLERY = True  # True=Worker画廊模式 False=直接上传TG
+USE_GALLERY_CACHE = True  # True=启用画廊缓存 False=禁用缓存（测试用）

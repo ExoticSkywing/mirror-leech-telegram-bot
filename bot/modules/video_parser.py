@@ -438,12 +438,13 @@ class VideoLinkProcessor(TaskListener):
             # 重新抛出异常，让上层处理
             raise Exception(f"yt-dlp下载失败: {str(e)}")
 
-    async def _upload_gallery_by_url(self, images_list, video_info):
+    async def _upload_gallery_by_url(self, images_list, video_info, gallery_url=None):
         """
         直接使用URL上传图集到Telegram（无需下载）
         
         Args:
             images_list: 图片URL列表
+            gallery_url: 在线画廊URL（可选）
             video_info: 视频信息
             
         Raises:
@@ -598,14 +599,28 @@ class VideoLinkProcessor(TaskListener):
         # 计算耗时（从开始到现在）
         elapsed = int(time() - start_ts)
         
+        # 构建完成消息
+        completion_msg = (
+            f"✅ <b>图集上传完成</b> 📸 {total_sent}/{total_imgs}\n\n"
+            f"📹 {title}\n"
+            f"👤 {author}\n\n"
+            f"⏱️ 耗时: {elapsed}秒\n"
+            f"⚡ 直传模式"
+        )
+        
+        # 如果有画廊URL，添加到消息中
+        if gallery_url:
+            completion_msg += (
+                f"\n\n"
+                f"🌐 <b>在线画廊</b>：\n"
+                f"<code>{gallery_url}</code>\n"
+                f"💡 点击链接可在浏览器查看完整画廊"
+            )
+        
         try:
             await edit_message(
                 upload_status_msg,
-                f"✅ <b>图集上传完成</b> 📸 {total_sent}/{total_imgs}\n\n"
-                f"📹 {title}\n"
-                f"👤 {author}\n\n"
-                f"⏱️ 耗时: {elapsed}秒\n"
-                f"⚡ 直传模式",
+                completion_msg,
                 buttons.build_menu(3)
             )
         except Exception as e:
@@ -699,7 +714,7 @@ class VideoLinkProcessor(TaskListener):
         将图集作为媒体组（相册）上传到Telegram
         
         支持两种模式：
-        1. Telegraph 秒传模式（推荐）：3-5秒创建在线画廊
+        1. Worker 画廊模式（推荐）：Catbox图床 + Cloudflare Worker，国内外均可访问
         2. Telegram 直接上传模式：下载后上传到群组
 
         Args:
@@ -710,9 +725,9 @@ class VideoLinkProcessor(TaskListener):
         try:
             LOGGER.info(f"Starting image gallery processing: {len(images_list)} images")
             
-            # 检查是否启用 Telegraph 秒传
+            # 检查是否启用 Worker 画廊模式
             if Config.USE_TELEGRAPH_FOR_GALLERY:
-                LOGGER.info("Using Telegraph instant upload mode")
+                LOGGER.info("Using Worker Gallery mode (Catbox + Cloudflare)")
                 await self._handle_gallery_telegraph_mode(images_list, video_info)
                 return
             
@@ -732,9 +747,81 @@ class VideoLinkProcessor(TaskListener):
 
 
     async def _handle_gallery_telegraph_mode(self, images_list, video_info):
-        """Worker 画廊模式：下载 → Telegraph图床 → Worker画廊"""
+        """Worker 画廊模式：先检查缓存 → 下载 → Catbox图床 → Worker画廊"""
+        
+        import aiohttp
+        from bot.core.config_manager import Config
+        from bot.helper.telegram_helper.button_build import ButtonMaker
         
         start_time = time()
+        original_url = video_info.get('webpage_url', video_info.get('url', ''))
+        
+        # ========== 第0步：生成确定性ID并检查是否已存在 ==========
+        gallery_id = self._generate_gallery_id(original_url)
+        LOGGER.info(f"Gallery ID: {gallery_id} for URL: {original_url}")
+        
+        worker_api = getattr(Config, 'WORKER_GALLERY_API', '')
+        if not worker_api:
+            raise Exception("WORKER_GALLERY_API 未配置")
+        
+        # 检查缓存开关
+        use_cache = getattr(Config, 'USE_GALLERY_CACHE', True)
+        
+        if use_cache:
+            # 先检查画廊是否已存在
+            await edit_message(
+                self.status_msg,
+                f"🔍 检查画廊缓存...\n"
+                f"📸 {len(images_list)} 张图片\n"
+                f"📝 {video_info.get('title', '图集')[:50]}"
+            )
+            
+            try:
+                async with aiohttp.ClientSession() as session:
+                    check_url = f"{worker_api.rstrip('/')}/api/check/{gallery_id}"
+                    async with session.get(
+                        check_url,
+                        timeout=aiohttp.ClientTimeout(total=10)
+                    ) as response:
+                        if response.status == 200:
+                            check_result = await response.json()
+                        else:
+                            check_result = {'exists': False}
+            except Exception as e:
+                LOGGER.warning(f"Failed to check gallery existence: {e}, assuming not exists")
+                check_result = {'exists': False}
+            
+            # ========== 画廊已存在，直接返回 ==========
+            if check_result.get('exists'):
+                gallery_url = check_result.get('gallery_url', '')
+                image_count = check_result.get('image_count', len(images_list))
+                
+                LOGGER.info(f"✅ Gallery cache hit! {gallery_id} -> {gallery_url}")
+                
+                buttons = ButtonMaker()
+                buttons.url_button("🎨 在线画廊", gallery_url)
+                buttons.data_button("📥 批量下载", f"manual_tg_upload_{self.status_msg.id}")
+                
+                await edit_message(
+                    self.status_msg,
+                    f"✅ <b>成功命中画廊</b>\n\n"
+                    f"📸 共 {image_count} 张图片\n"
+                    f"📹 {video_info.get('title', '图集')}\n\n"
+                    f"💡 画廊有效期30天\n\n"
+                    f"🌐 <b>在线画廊</b>：\n"
+                    f"<code>{gallery_url}</code>\n"
+                    f"💬 点击链接即可复制，分享给好友一起欣赏！",
+                    buttons=buttons.build_menu(2)
+                )
+                
+                # 保存状态供手动上传使用（包含画廊URL）
+                await self._save_gallery_state_for_manual_upload(images_list, video_info, gallery_url)
+                return
+        else:
+            LOGGER.info(f"Gallery cache is disabled, will create new gallery")
+        
+        # ========== 画廊不存在或缓存已禁用，走正常创建流程 ==========
+        LOGGER.info(f"Creating new gallery: {gallery_id}")
         
         # 更新状态
         await edit_message(
@@ -768,7 +855,7 @@ class VideoLinkProcessor(TaskListener):
             
             LOGGER.info(f"Uploaded {len(catbox_urls)} images to Catbox")
             
-            # 第3步：调用 Worker API 创建画廊
+            # 第3步：调用 Worker API 创建画廊（带确定性ID）
             await edit_message(
                 self.status_msg,
                 f"🎨 正在创建画廊...\n"
@@ -776,7 +863,7 @@ class VideoLinkProcessor(TaskListener):
                 f"⚡ 即将完成..."
             )
             
-            worker_response = await self._create_worker_gallery(catbox_urls, video_info)
+            worker_response = await self._create_worker_gallery(gallery_id, catbox_urls, video_info)
             
             if not worker_response.get('success'):
                 error_msg = worker_response.get('message', '未知错误')
@@ -812,7 +899,7 @@ class VideoLinkProcessor(TaskListener):
             buttons = ButtonMaker()
             buttons.url_button("🎨 在线画廊", gallery_url)
             buttons.data_button(
-                "📥 上传到群组", 
+                "📥 批量下载", 
                 f"manual_tg_upload_{self.status_msg.id}"
             )
             
@@ -836,8 +923,8 @@ class VideoLinkProcessor(TaskListener):
                 buttons=buttons.build_menu(2)
             )
             
-            # 保存状态供手动上传使用
-            await self._save_gallery_state_for_manual_upload(images_list, video_info)
+            # 保存状态供手动上传使用（包含画廊URL）
+            await self._save_gallery_state_for_manual_upload(images_list, video_info, gallery_url)
             
             # 清理临时文件
             await self._cleanup_downloaded_images(downloaded_images)
@@ -859,12 +946,18 @@ class VideoLinkProcessor(TaskListener):
             await self._handle_gallery_telegram_mode(images_list, video_info)
 
 
-    async def _handle_gallery_telegram_mode(self, images_list, video_info):
-        """Telegram 直接上传模式（原有逻辑）"""
+    async def _handle_gallery_telegram_mode(self, images_list, video_info, gallery_url=None):
+        """Telegram 直接上传模式（原有逻辑）
+        
+        Args:
+            images_list: 图片URL列表
+            video_info: 视频信息字典
+            gallery_url: 在线画廊URL（可选，如果有的话会在完成消息中显示）
+        """
         
         # 第一步：尝试直接用 URL 上传（零下载，极速）
         try:
-            await self._upload_gallery_by_url(images_list, video_info)
+            await self._upload_gallery_by_url(images_list, video_info, gallery_url)
             return  # 成功则直接返回
         except Exception as url_err:
             LOGGER.warning(f"URL direct upload failed: {url_err}, falling back to download mode")
@@ -1206,8 +1299,27 @@ class VideoLinkProcessor(TaskListener):
 
         return "\n".join(lines) if lines else "图集"
 
+    # ========================================================================
+    # ⚠️ DEPRECATED: 以下为旧的 Telegraph 直接秒传实现，已被 Worker 画廊替代
+    # ========================================================================
+    # 旧方案问题：
+    # 1. Telegraph 直接引用原始图片URL，会因为防盗链、Referer限制等原因导致图片裂开
+    # 2. Telegraph 在中国大陆无法访问
+    # 
+    # 新方案：Worker 画廊 (Catbox图床 + Cloudflare Pages)
+    # 1. 下载图片到服务器
+    # 2. 上传到 Catbox.moe 免费图床（永久、无限制）
+    # 3. 通过 Cloudflare Worker 创建画廊页面（国内外均可访问）
+    # 
+    # 以下代码保留仅供参考，实际运行中不会被调用
+    # ========================================================================
+
     async def _create_telegraph_gallery(self, images_list, video_info):
-        """创建 Telegraph 画廊"""
+        """
+        [DEPRECATED] 创建 Telegraph 画廊（旧实现，已废弃）
+        
+        此函数已不再使用，请使用 _handle_gallery_telegraph_mode() 代替
+        """
         from telegraph import Telegraph
         
         try:
@@ -1242,7 +1354,11 @@ class VideoLinkProcessor(TaskListener):
 
 
     def _build_gallery_html(self, images_list, video_info):
-        """构建 Telegraph 画廊 HTML"""
+        """
+        [DEPRECATED] 构建 Telegraph 画廊 HTML（旧实现，已废弃）
+        
+        此函数已不再使用，新方案使用 Cloudflare Worker 渲染画廊页面
+        """
         
         title = video_info.get('title', '图集')
         # 兼容 author 为字符串或字典的情况
@@ -1275,7 +1391,11 @@ class VideoLinkProcessor(TaskListener):
 
 
     def _format_gallery_summary(self, images_list, video_info, elapsed, mode="telegraph"):
-        """格式化图集汇总消息"""
+        """
+        [DEPRECATED] 格式化图集汇总消息（旧实现，已废弃）
+        
+        此函数已不再使用，新方案直接在 _handle_gallery_telegraph_mode 中构造消息
+        """
         
         title = video_info.get('title', '图集')
         # 兼容 author 为字符串或字典的情况
@@ -1540,8 +1660,13 @@ class VideoLinkProcessor(TaskListener):
         
         return catbox_urls
 
-    async def _create_worker_gallery(self, image_urls, video_info):
-        """调用 Worker API 创建画廊"""
+    def _generate_gallery_id(self, original_url: str) -> str:
+        """从URL生成确定性的画廊ID（12位MD5哈希）"""
+        import hashlib
+        return hashlib.md5(original_url.encode()).hexdigest()[:12]
+
+    async def _create_worker_gallery(self, gallery_id: str, image_urls, video_info):
+        """调用 Worker API 创建画廊（带确定性ID）"""
         import aiohttp
         from bot.core.config_manager import Config
         
@@ -1553,6 +1678,7 @@ class VideoLinkProcessor(TaskListener):
         api_url = f"{worker_api.rstrip('/')}/api/create-gallery"
         
         payload = {
+            'gallery_id': gallery_id,  # 指定画廊ID
             'title': video_info.get('title', '图集'),
             'author': video_info.get('author', '未知'),
             'images': image_urls
@@ -1578,17 +1704,18 @@ class VideoLinkProcessor(TaskListener):
     # 状态缓存（用于手动上传）
     _manual_upload_cache = {}
 
-    async def _save_gallery_state_for_manual_upload(self, images_list, video_info):
+    async def _save_gallery_state_for_manual_upload(self, images_list, video_info, gallery_url=None):
         """保存图集状态供手动上传使用"""
         msg_id = self.status_msg.id
         VideoLinkProcessor._manual_upload_cache[msg_id] = {
             'images_list': images_list,
             'video_info': video_info,
+            'gallery_url': gallery_url,  # 保存画廊URL
             'timestamp': time(),
             'user_id': self.message.from_user.id,
             'chat_id': self.message.chat.id
         }
-        LOGGER.info(f"Saved manual upload state for message {msg_id}")
+        LOGGER.info(f"Saved manual upload state for message {msg_id} (gallery_url: {gallery_url})")
 
     @classmethod
     async def load_manual_upload_state(cls, msg_id):
@@ -1925,10 +2052,11 @@ async def handle_manual_tg_upload(client, query):
         temp_processor.status_msg = query.message
         temp_processor.message = query.message.reply_to_message or query.message
         
-        # 执行 Telegram 上传模式
+        # 执行 Telegram 上传模式（传入画廊URL，以便在完成消息中显示）
         await temp_processor._handle_gallery_telegram_mode(
             state['images_list'],
-            state['video_info']
+            state['video_info'],
+            state.get('gallery_url')  # 传递画廊URL
         )
         
         # 清理状态
