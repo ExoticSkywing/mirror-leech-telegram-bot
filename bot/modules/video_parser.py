@@ -16,7 +16,7 @@ from bot.core.config_manager import Config
 from bot.helper.ext_utils.bot_utils import new_task, sync_to_async
 from bot.helper.ext_utils.files_utils import clean_target
 from bot.helper.ext_utils.url_utils import get_domain
-from bot.helper.parse_video_helper import parse_video_api, parse_video_v2_api, format_video_info
+from bot.helper.parse_video_helper import parse_video_api, parse_video_v2_api, format_video_info, parse_weixin_article
 from bot.helper.listeners.task_listener import TaskListener
 from bot.helper.mirror_leech_utils.download_utils.yt_dlp_download import YoutubeDLHelper
 from bot.helper.ext_utils.membership_utils import check_membership
@@ -161,16 +161,24 @@ class VideoLinkProcessor(TaskListener):
             )
 
             parse_result = None
-            if prefer_v2:
-                # 新接口优先
-                parse_result = await parse_video_v2_api(self.url)
-                if not parse_result:
-                    parse_result = await parse_video_api(self.url)
-            else:
-                # 旧接口优先
-                parse_result = await parse_video_api(self.url)
-                if not parse_result:
+            
+            # 优先检查微信公众号（直接本地解析）
+            if "mp.weixin.qq.com" in self.url:
+                LOGGER.info("Detected Weixin article, using local parser")
+                parse_result = await parse_weixin_article(self.url)
+            
+            # 如果不是微信或解析失败，尝试API
+            if not parse_result:
+                if prefer_v2:
+                    # 新接口优先
                     parse_result = await parse_video_v2_api(self.url)
+                    if not parse_result:
+                        parse_result = await parse_video_api(self.url)
+                else:
+                    # 旧接口优先
+                    parse_result = await parse_video_api(self.url)
+                    if not parse_result:
+                        parse_result = await parse_video_v2_api(self.url)
 
             if parse_result:
                 # Parse-Video解析成功
@@ -182,6 +190,7 @@ class VideoLinkProcessor(TaskListener):
                     "author": parse_result.get("author", {}).get("name", ""),
                     "cover_url": parse_result.get("cover_url", ""),
                     "platform": parse_result.get("platform", ""),
+                    "url": parse_result.get("url", self.url),  # 确保有URL用于画廊ID生成
                 }
 
                 # 判断是视频还是图集
@@ -754,7 +763,12 @@ class VideoLinkProcessor(TaskListener):
         from bot.helper.telegram_helper.button_build import ButtonMaker
         
         start_time = time()
-        original_url = video_info.get('webpage_url', video_info.get('url', ''))
+        # 优先使用 video_info 中的 URL，如果没有则使用 self.url（原始输入URL）
+        original_url = video_info.get('webpage_url') or video_info.get('url') or self.url
+        
+        if not original_url:
+            LOGGER.warning("No URL found for gallery ID generation, using fallback")
+            original_url = f"gallery_{int(time() * 1000)}"  # 时间戳作为最后的后备
         
         # ========== 第0步：生成确定性ID并检查是否已存在 ==========
         gallery_id = self._generate_gallery_id(original_url)
@@ -798,20 +812,39 @@ class VideoLinkProcessor(TaskListener):
                 
                 LOGGER.info(f"✅ Gallery cache hit! {gallery_id} -> {gallery_url}")
                 
+                # 检测是否包含GIF
+                has_gif = self._contains_gif(images_list)
+                
                 buttons = ButtonMaker()
                 buttons.url_button("🎨 在线画廊", gallery_url)
-                buttons.data_button("📥 批量下载", f"manual_tg_upload_{self.status_msg.id}")
                 
-                await edit_message(
-                    self.status_msg,
+                # 如果包含GIF，不显示批量下载按钮
+                if not has_gif:
+                    buttons.data_button("📥 批量下载", f"manual_tg_upload_{self.status_msg.id}")
+                
+                # 构建消息
+                msg_text = (
                     f"✅ <b>成功命中画廊</b>\n\n"
                     f"📸 共 {image_count} 张图片\n"
                     f"📹 {video_info.get('title', '图集')}\n\n"
                     f"💡 画廊有效期30天\n\n"
                     f"🌐 <b>在线画廊</b>：\n"
                     f"<code>{gallery_url}</code>\n"
-                    f"💬 点击链接即可复制，分享给好友一起欣赏！",
-                    buttons=buttons.build_menu(2)
+                    f"💬 点击链接即可复制，分享给好友一起欣赏！"
+                )
+                
+                # 如果包含GIF，添加提示
+                if has_gif:
+                    msg_text += (
+                        f"\n\n"
+                        f"⚠️ <b>包含GIF图片</b>\n"
+                        f"💡 请使用在线画廊查看和下载（TG相册不支持GIF动图）"
+                    )
+                
+                await edit_message(
+                    self.status_msg,
+                    msg_text,
+                    buttons=buttons.build_menu(2) if not has_gif else buttons.build_menu(1)
                 )
                 
                 # 保存状态供手动上传使用（包含画廊URL）
@@ -823,47 +856,79 @@ class VideoLinkProcessor(TaskListener):
         # ========== 画廊不存在或缓存已禁用，走正常创建流程 ==========
         LOGGER.info(f"Creating new gallery: {gallery_id}")
         
-        # 更新状态
-        await edit_message(
-            self.status_msg,
-            f"📥 正在下载图集...\n"
-            f"📸 共 {len(images_list)} 张图片\n"
-            f"📝 {video_info.get('title', '图集')[:50]}"
-        )
+        # ========== 检测是否为微信公众号来源 ==========
+        platform = video_info.get('platform', '').lower()
+        is_weixin = platform == 'weixin' or 'mp.weixin.qq.com' in original_url
         
-        try:
-            # 第1步：下载图片到服务器
-            downloaded_images = await self._download_images_for_gallery(images_list, video_info)
+        if is_weixin:
+            # ========== 微信特殊处理：使用代理域名，不下载 ==========
+            LOGGER.info("Detected WeChat source, using proxy domain (no download)")
             
-            if not downloaded_images:
-                raise Exception("未能下载任何图片")
-            
-            LOGGER.info(f"Downloaded {len(downloaded_images)} images successfully")
-            
-            # 第2步：上传到 Catbox 图床
             await edit_message(
                 self.status_msg,
-                f"📤 Catbox正在进食...\n"
-                f"📸 已下载 {len(downloaded_images)}/{len(images_list)} 张\n"
-                f"⏳ 请稍候..."
+                f"🎨 正在处理微信图片...\n"
+                f"📸 共 {len(images_list)} 张图片\n"
+                f"💡 使用代理保持GIF动画\n"
+                f"📝 {video_info.get('title', '图集')[:50]}"
             )
             
-            catbox_urls = await self._upload_to_catbox_image_host(downloaded_images)
+            # 提取并代理微信图片URL
+            proxied_urls = self._proxy_weixin_images(images_list)
             
-            if not catbox_urls:
-                raise Exception("上传图床失败")
+            if not proxied_urls:
+                raise Exception("微信图片代理失败")
             
-            LOGGER.info(f"Uploaded {len(catbox_urls)} images to Catbox")
+            LOGGER.info(f"Proxied {len(proxied_urls)} WeChat images")
+            image_urls_for_worker = proxied_urls
             
-            # 第3步：调用 Worker API 创建画廊（带确定性ID）
+        else:
+            # ========== 非微信来源：走原流程（下载 → Catbox → Worker） ==========
+            await edit_message(
+                self.status_msg,
+                f"📥 正在下载图集...\n"
+                f"📸 共 {len(images_list)} 张图片\n"
+                f"📝 {video_info.get('title', '图集')[:50]}"
+            )
+            
+            try:
+                # 第1步：下载图片到服务器
+                downloaded_images = await self._download_images_for_gallery(images_list, video_info)
+                
+                if not downloaded_images:
+                    raise Exception("未能下载任何图片")
+                
+                LOGGER.info(f"Downloaded {len(downloaded_images)} images successfully")
+                
+                # 第2步：上传到 Catbox 图床
+                await edit_message(
+                    self.status_msg,
+                    f"📤 Catbox正在进食...\n"
+                    f"📸 已下载 {len(downloaded_images)}/{len(images_list)} 张\n"
+                    f"⏳ 请稍候..."
+                )
+                
+                catbox_urls = await self._upload_to_catbox_image_host(downloaded_images)
+                
+                if not catbox_urls:
+                    raise Exception("上传图床失败")
+                
+                LOGGER.info(f"Uploaded {len(catbox_urls)} images to Catbox")
+                image_urls_for_worker = catbox_urls
+                
+            except Exception as e:
+                LOGGER.error(f"Download/Upload error: {e}")
+                raise
+        
+        # ========== 第3步：调用 Worker API 创建画廊（带确定性ID） ==========
+        try:
             await edit_message(
                 self.status_msg,
                 f"🎨 正在创建画廊...\n"
-                f"📸 已上传 {len(catbox_urls)} 张图片\n"
+                f"📸 共 {len(image_urls_for_worker)} 张图片\n"
                 f"⚡ 即将完成..."
             )
             
-            worker_response = await self._create_worker_gallery(gallery_id, catbox_urls, video_info)
+            worker_response = await self._create_worker_gallery(gallery_id, image_urls_for_worker, video_info)
             
             if not worker_response.get('success'):
                 error_msg = worker_response.get('message', '未知错误')
@@ -894,24 +959,41 @@ class VideoLinkProcessor(TaskListener):
             
             LOGGER.info(f"Worker gallery created successfully in {elapsed}s: {gallery_url}")
             
-            # 第4步：展示结果（两个按钮）
+            # 检测是否包含GIF
+            has_gif = self._contains_gif(images_list)
+            
+            # 第4步：展示结果
             from bot.helper.telegram_helper.button_build import ButtonMaker
             buttons = ButtonMaker()
             buttons.url_button("🎨 在线画廊", gallery_url)
-            buttons.data_button(
-                "📥 批量下载", 
-                f"manual_tg_upload_{self.status_msg.id}"
-            )
+            
+            # 如果包含GIF，不显示批量下载按钮
+            if not has_gif:
+                buttons.data_button(
+                    "📥 批量下载", 
+                    f"manual_tg_upload_{self.status_msg.id}"
+                )
             
             summary_text = (
                 f"✅ <b>图集已创建！</b>\n\n"
-                f"📸 共 {len(catbox_urls)} 张图片\n"
+                f"📸 共 {len(image_urls_for_worker)} 张图片\n"
                 f"📹 {video_info.get('title', '图集')}\n"
                 f"👤 {video_info.get('author', '未知')}\n"
                 f"⏱️ 耗时: {elapsed}秒\n\n"
                 f"🌐 <b>在线画廊</b>：点击下方按钮查看\n"
                 f"💡 国内外均可访问 · 有效期30天\n\n"
-                f"📝 如需批量下载，点击右侧按钮\n\n"
+            )
+            
+            # 如果不包含GIF，添加批量下载提示
+            if not has_gif:
+                summary_text += f"📝 如需批量下载，点击右侧按钮\n\n"
+            else:
+                summary_text += (
+                    f"⚠️ <b>包含GIF图片</b>\n"
+                    f"💡 请使用在线画廊查看和下载（TG相册不支持GIF动图）\n\n"
+                )
+            
+            summary_text += (
                 f"🔗 <b>分享链接</b>：\n"
                 f"<code>{gallery_url}</code>\n"
                 f"💬 点击链接即可复制，分享给好友一起欣赏！"
@@ -920,14 +1002,15 @@ class VideoLinkProcessor(TaskListener):
             await edit_message(
                 self.status_msg,
                 summary_text,
-                buttons=buttons.build_menu(2)
+                buttons=buttons.build_menu(2) if not has_gif else buttons.build_menu(1)
             )
             
             # 保存状态供手动上传使用（包含画廊URL）
             await self._save_gallery_state_for_manual_upload(images_list, video_info, gallery_url)
             
-            # 清理临时文件
-            await self._cleanup_downloaded_images(downloaded_images)
+            # 清理临时文件（仅非微信路径需要清理）
+            if not is_weixin:
+                await self._cleanup_downloaded_images(downloaded_images)
             
         except Exception as e:
             LOGGER.error(f"Gallery creation failed: {e}")
@@ -1533,7 +1616,6 @@ class VideoLinkProcessor(TaskListener):
                 
             async with semaphore:
                 try:
-                    final_path = ospath.join(temp_dir, f"image_{idx:03d}.jpg")
                     temp_output = ospath.join(temp_dir, f'temp_{idx:03d}')
                     
                     cmd = [
@@ -1564,21 +1646,37 @@ class VideoLinkProcessor(TaskListener):
                     
                     temp_file = downloaded_files[0]
                     
-                    # 转换为JPG
-                    def convert_image():
-                        from PIL import Image
-                        img = Image.open(temp_file)
-                        if img.mode in ('RGBA', 'LA', 'P'):
-                            background = Image.new('RGB', img.size, (255, 255, 255))
-                            if img.mode == 'P':
-                                img = img.convert('RGBA')
-                            background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
-                            img = background
-                        elif img.mode != 'RGB':
-                            img = img.convert('RGB')
-                        img.save(final_path, 'JPEG', quality=95)
+                    # 检测文件扩展名
+                    file_ext = ospath.splitext(temp_file)[1].lower()
                     
-                    await sync_to_async(convert_image)
+                    # 如果是GIF，保持GIF格式不转换
+                    if file_ext == '.gif':
+                        final_path = ospath.join(temp_dir, f"image_{idx:03d}.gif")
+                        # 直接移动文件，不转换
+                        def keep_gif():
+                            import shutil
+                            shutil.move(temp_file, final_path)
+                        
+                        await sync_to_async(keep_gif)
+                        LOGGER.info(f"Image {idx + 1}: Kept as GIF (animated)")
+                    else:
+                        # 非GIF图片转换为JPG
+                        final_path = ospath.join(temp_dir, f"image_{idx:03d}.jpg")
+                        
+                        def convert_image():
+                            from PIL import Image
+                            img = Image.open(temp_file)
+                            if img.mode in ('RGBA', 'LA', 'P'):
+                                background = Image.new('RGB', img.size, (255, 255, 255))
+                                if img.mode == 'P':
+                                    img = img.convert('RGBA')
+                                background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+                                img = background
+                            elif img.mode != 'RGB':
+                                img = img.convert('RGB')
+                            img.save(final_path, 'JPEG', quality=95)
+                        
+                        await sync_to_async(convert_image)
                     
                     try:
                         await aioremove(temp_file)
@@ -1609,6 +1707,17 @@ class VideoLinkProcessor(TaskListener):
         
         for idx, img_path in enumerate(image_paths):
             try:
+                # 检测文件扩展名和类型
+                file_ext = ospath.splitext(img_path)[1].lower()
+                
+                # 根据扩展名设置文件名和MIME类型
+                if file_ext == '.gif':
+                    filename = 'image.gif'
+                    content_type = 'image/gif'
+                else:
+                    filename = 'image.jpg'
+                    content_type = 'image/jpeg'
+                
                 # 读取图片数据
                 async with aioopen(img_path, 'rb') as f:
                     img_data = await f.read()
@@ -1621,8 +1730,8 @@ class VideoLinkProcessor(TaskListener):
                     form_data.add_field(
                         'fileToUpload',
                         img_data,
-                        filename='image.jpg',
-                        content_type='image/jpeg'
+                        filename=filename,
+                        content_type=content_type
                     )
                     
                     try:
@@ -1664,6 +1773,106 @@ class VideoLinkProcessor(TaskListener):
         """从URL生成确定性的画廊ID（12位MD5哈希）"""
         import hashlib
         return hashlib.md5(original_url.encode()).hexdigest()[:12]
+    
+    def _proxy_weixin_images(self, images_list: list) -> list:
+        """
+        微信图片URL代理处理
+        
+        将 mmbiz.qpic.cn 替换为 mmbiz.qpic.cn.in（公共代理）
+        保持GIF动态效果和透明背景
+        
+        Args:
+            images_list: 图片URL列表
+            
+        Returns:
+            list: 代理后的URL列表
+        """
+        proxied_urls = []
+        
+        for img_data in images_list:
+            # 提取URL
+            if isinstance(img_data, dict):
+                img_url = img_data.get('url', '')
+            else:
+                img_url = str(img_data)
+            
+            if not img_url:
+                continue
+            
+            # 替换微信CDN域名为代理域名
+            if 'mmbiz.qpic.cn' in img_url:
+                proxied_url = img_url.replace('mmbiz.qpic.cn', 'mmbiz.qpic.cn.in')
+                proxied_urls.append(proxied_url)
+                LOGGER.info(f"Proxied WeChat image: {img_url[:60]}... -> ...{proxied_url[-40:]}")
+            else:
+                # 非微信CDN图片，保持原样
+                proxied_urls.append(img_url)
+                LOGGER.warning(f"Non-WeChat CDN image in WeChat article: {img_url[:60]}")
+        
+        return proxied_urls
+    
+    def _contains_gif(self, images_list: list) -> bool:
+        """
+        检测图片列表中是否包含GIF
+        
+        支持多种GIF格式检测：
+        - 标准扩展名：.gif
+        - URL路径：/gif/
+        - 微信公众号：mmbiz_gif, wx_fmt=gif
+        - 其他平台：fmt=gif, type=gif
+        
+        Args:
+            images_list: 图片URL列表
+            
+        Returns:
+            True: 包含GIF
+            False: 不包含GIF
+        """
+        if not images_list:
+            return False
+        
+        gif_count = 0
+        for img_data in images_list:
+            # 提取URL
+            if isinstance(img_data, dict):
+                img_url = img_data.get('url', '')
+            else:
+                img_url = str(img_data)
+            
+            img_url_lower = img_url.lower()
+            
+            # 检测GIF的多种模式
+            is_gif = False
+            
+            # 1. 标准扩展名
+            if img_url_lower.endswith('.gif') or '.gif?' in img_url_lower:
+                is_gif = True
+            
+            # 2. URL路径包含gif
+            elif '/gif/' in img_url_lower or '_gif/' in img_url_lower or '/gifs/' in img_url_lower:
+                is_gif = True
+            
+            # 3. 微信公众号特殊格式
+            elif 'mmbiz_gif' in img_url_lower:  # 微信：mmbiz.qpic.cn/mmbiz_gif/...
+                is_gif = True
+            elif 'wx_fmt=gif' in img_url_lower:  # 微信：?wx_fmt=gif
+                is_gif = True
+            
+            # 4. 其他平台的参数格式
+            elif 'fmt=gif' in img_url_lower or 'format=gif' in img_url_lower:
+                is_gif = True
+            elif 'type=gif' in img_url_lower or 'filetype=gif' in img_url_lower:
+                is_gif = True
+            
+            if is_gif:
+                gif_count += 1
+                LOGGER.info(f"Detected GIF in gallery: {img_url[:100]}")
+        
+        if gif_count > 0:
+            LOGGER.info(f"Gallery contains {gif_count} GIF(s), will disable batch download")
+            return True
+        
+        return False
 
     async def _create_worker_gallery(self, gallery_id: str, image_urls, video_info):
         """调用 Worker API 创建画廊（带确定性ID）"""

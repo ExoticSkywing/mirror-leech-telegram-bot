@@ -5,6 +5,7 @@ Parse-Video API 调用模块
 
 import aiohttp
 import json
+import re
 from typing import Optional, Dict, Any
 from bot import LOGGER
 from bot.core.config_manager import Config
@@ -410,5 +411,113 @@ async def parse_video_v2_api(url: str, timeout: int = None) -> Optional[Dict[str
             return None
     except Exception as e:
         LOGGER.error(f"ParseV2 API unexpected error: {e}")
+        return None
+
+
+async def parse_weixin_article(url: str, timeout: int = 30) -> Optional[Dict[str, Any]]:
+    """
+    解析微信公众号文章
+    
+    Args:
+        url: 微信公众号文章链接 (mp.weixin.qq.com)
+        timeout: 超时时间(秒)
+    
+    Returns:
+        {
+            'title': '文章标题',
+            'author': {'name': '公众号名称'},
+            'images': ['https://...', ...],  # 图片列表
+            'desc': '文章文本内容',
+            'platform': 'weixin'
+        }
+    """
+    try:
+        # 检查是否是微信公众号链接
+        if not re.match(r'^(http(s)?://)mp\.weixin\.qq\.com/s/.*', url):
+            LOGGER.warning(f"Not a valid Weixin article URL: {url}")
+            return None
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=timeout),
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            ) as response:
+                if response.status != 200:
+                    LOGGER.error(f"Weixin article fetch failed with status {response.status}")
+                    return None
+                
+                html = await response.text()
+                
+                # 使用 BeautifulSoup 解析 HTML
+                try:
+                    from bs4 import BeautifulSoup
+                except ImportError:
+                    LOGGER.error("BeautifulSoup4 not installed. Please run: pip install beautifulsoup4 lxml")
+                    return None
+                
+                soup = BeautifulSoup(html, 'lxml')
+                
+                # 提取标题
+                title_tag = soup.find('h1', {'class': 'rich_media_title'})
+                title = title_tag.text.strip() if title_tag else '微信文章'
+                
+                # 提取图片
+                images = []
+                
+                # 方式1：rich_media_content 内的图片（常见）
+                if rich_media_content := soup.find('div', {'class': 'rich_media_content'}):
+                    img_tags = rich_media_content.find_all('img', {'class': 'rich_pages'})
+                    for img in img_tags:
+                        # 图片链接在 data-src 属性中
+                        img_url = img.get('data-src') or img.get('src')
+                        if img_url:
+                            images.append(img_url)
+                
+                # 方式2：share_content_page 内的图片（图集模式）
+                elif share_content_page := soup.find('div', {'class': 'share_content_page'}):
+                    swiper_items = share_content_page.find_all('div', {'class': 'swiper_item'})
+                    for item in swiper_items:
+                        img = item.find('img')
+                        if img:
+                            img_url = img.get('data-src') or img.get('src')
+                            if img_url:
+                                images.append(img_url)
+                
+                # 如果没有找到图片，尝试所有img标签
+                if not images:
+                    all_imgs = soup.find_all('img')
+                    for img in all_imgs:
+                        img_url = img.get('data-src') or img.get('src')
+                        if img_url and 'mmbiz.qpic.cn' in img_url:
+                            images.append(img_url)
+                
+                # 提取作者/公众号名称
+                author_tag = soup.find('a', {'id': 'js_name'}) or soup.find('strong', {'class': 'profile_nickname'})
+                author_name = author_tag.text.strip() if author_tag else '微信公众号'
+                
+                # 提取文本内容（用于描述）
+                desc = ''
+                if rich_media_content := soup.find('div', {'class': 'rich_media_content'}):
+                    # 提取纯文本
+                    text_parts = rich_media_content.stripped_strings
+                    desc = ' '.join(list(text_parts)[:200])  # 限制长度
+                
+                result = {
+                    'title': title,
+                    'author': {'name': author_name},
+                    'images': images,
+                    'desc': desc[:500] if desc else '',  # 限制描述长度
+                    'platform': 'weixin',
+                    'url': url,  # 添加原始URL，用于生成画廊ID
+                }
+                
+                LOGGER.info(f"Weixin article parsed: {title}, {len(images)} images")
+                return result
+                
+    except Exception as e:
+        LOGGER.error(f"Weixin article parse error: {e}")
+        import traceback
+        LOGGER.error(traceback.format_exc())
         return None
 
