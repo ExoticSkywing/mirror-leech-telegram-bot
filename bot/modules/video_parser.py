@@ -169,16 +169,16 @@ class VideoLinkProcessor(TaskListener):
             
             # 如果不是微信或解析失败，尝试API
             if not parse_result:
-                if prefer_v2:
-                    # 新接口优先
-                    parse_result = await parse_video_v2_api(self.url)
-                    if not parse_result:
-                        parse_result = await parse_video_api(self.url)
-                else:
-                    # 旧接口优先
+            if prefer_v2:
+                # 新接口优先
+                parse_result = await parse_video_v2_api(self.url)
+                if not parse_result:
                     parse_result = await parse_video_api(self.url)
-                    if not parse_result:
-                        parse_result = await parse_video_v2_api(self.url)
+            else:
+                # 旧接口优先
+                parse_result = await parse_video_api(self.url)
+                if not parse_result:
+                    parse_result = await parse_video_v2_api(self.url)
 
             if parse_result:
                 # Parse-Video解析成功
@@ -610,10 +610,10 @@ class VideoLinkProcessor(TaskListener):
         
         # 构建完成消息
         completion_msg = (
-            f"✅ <b>图集上传完成</b> 📸 {total_sent}/{total_imgs}\n\n"
-            f"📹 {title}\n"
-            f"👤 {author}\n\n"
-            f"⏱️ 耗时: {elapsed}秒\n"
+                f"✅ <b>图集上传完成</b> 📸 {total_sent}/{total_imgs}\n\n"
+                f"📹 {title}\n"
+                f"👤 {author}\n\n"
+                f"⏱️ 耗时: {elapsed}秒\n"
             f"⚡ 直传模式"
         )
         
@@ -783,14 +783,14 @@ class VideoLinkProcessor(TaskListener):
         
         if use_cache:
             # 先检查画廊是否已存在
-            await edit_message(
-                self.status_msg,
+        await edit_message(
+            self.status_msg,
                 f"🔍 检查画廊缓存...\n"
                 f"📸 {len(images_list)} 张图片\n"
-                f"📝 {video_info.get('title', '图集')[:50]}"
-            )
-            
-            try:
+            f"📝 {video_info.get('title', '图集')[:50]}"
+        )
+        
+        try:
                 async with aiohttp.ClientSession() as session:
                     check_url = f"{worker_api.rstrip('/')}/api/check/{gallery_id}"
                     async with session.get(
@@ -815,7 +815,7 @@ class VideoLinkProcessor(TaskListener):
                 # 检测是否包含GIF
                 has_gif = self._contains_gif(images_list)
                 
-                buttons = ButtonMaker()
+            buttons = ButtonMaker()
                 buttons.url_button("🎨 在线画廊", gallery_url)
                 
                 # 如果包含GIF，不显示批量下载按钮
@@ -827,7 +827,7 @@ class VideoLinkProcessor(TaskListener):
                     f"✅ <b>成功命中画廊</b>\n\n"
                     f"📸 共 {image_count} 张图片\n"
                     f"📹 {video_info.get('title', '图集')}\n\n"
-                    f"💡 画廊有效期30天\n\n"
+                    f"💡 画廊有效期永久\n\n"
                     f"🌐 <b>在线画廊</b>：\n"
                     f"<code>{gallery_url}</code>\n"
                     f"💬 点击链接即可复制，分享给好友一起欣赏！"
@@ -838,11 +838,11 @@ class VideoLinkProcessor(TaskListener):
                     msg_text += (
                         f"\n\n"
                         f"⚠️ <b>包含GIF图片</b>\n"
-                        f"💡 请使用在线画廊查看和下载（TG相册不支持GIF动图）"
-                    )
-                
-                await edit_message(
-                    self.status_msg,
+                        f"💡 请使用在线画廊查看和下载"
+            )
+            
+            await edit_message(
+                self.status_msg,
                     msg_text,
                     buttons=buttons.build_menu(2) if not has_gif else buttons.build_menu(1)
                 )
@@ -944,7 +944,7 @@ class VideoLinkProcessor(TaskListener):
                     from bot.helper.telegram_helper.button_build import ButtonMaker
                     buttons = ButtonMaker()
                     buttons.data_button(
-                        "📥 批量下载", 
+                "📥 批量下载", 
                         f"manual_tg_upload_{self.status_msg.id}"
                     )
                     await edit_message(self.status_msg, buttons=buttons.build_menu(1))
@@ -981,7 +981,7 @@ class VideoLinkProcessor(TaskListener):
                 f"👤 {video_info.get('author', '未知')}\n"
                 f"⏱️ 耗时: {elapsed}秒\n\n"
                 f"🌐 <b>在线画廊</b>：点击下方按钮查看\n"
-                f"💡 国内外均可访问 · 有效期30天\n\n"
+                f"💡 国内外均可访问 · 有效期永久\n\n"
             )
             
             # 如果不包含GIF，添加批量下载提示
@@ -990,7 +990,7 @@ class VideoLinkProcessor(TaskListener):
             else:
                 summary_text += (
                     f"⚠️ <b>包含GIF图片</b>\n"
-                    f"💡 请使用在线画廊查看和下载（TG相册不支持GIF动图）\n\n"
+                    f"💡 请使用在线画廊查看和下载\n\n"
                 )
             
             summary_text += (
@@ -2278,8 +2278,8 @@ async def handle_manual_tg_upload(client, query):
         try:
             from bot.helper.telegram_helper.message_utils import edit_message
             await edit_message(query.message, f"❌ 上传失败：{str(e)[:100]}")
-        except Exception:
-            pass
+    except Exception:
+        pass
 
 
 @new_task
