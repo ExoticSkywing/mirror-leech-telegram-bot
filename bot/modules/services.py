@@ -2,7 +2,6 @@ from time import time
 from .. import LOGGER
 
 from ..helper.ext_utils.bot_utils import new_task
-from ..helper.telegram_helper.button_build import ButtonMaker
 from ..helper.telegram_helper.message_utils import send_message, edit_message, send_file, auto_delete_message
 from ..helper.telegram_helper.filters import CustomFilters
 from ..helper.telegram_helper.bot_commands import BotCommands
@@ -10,15 +9,15 @@ from ..helper.telegram_helper.bot_commands import BotCommands
 
 @new_task
 async def start(_, message):
-    buttons = ButtonMaker()
-    buttons.url_button(
-        "访问主页", "https://1yo.cc"
-    )
-    buttons.url_button("作者", "https://t.me/nebuluxe")
-    reply_markup = buttons.build_menu(2)
+    # buttons = ButtonMaker()
+    # buttons.url_button(
+    #     "访问主页", "https://1yo.cc"
+    # )
+    # buttons.url_button("作者", "https://t.me/nebuluxe")
+    # reply_markup = buttons.build_menu(2)
     start_string = f"""
-🔮即刻激活：
-发送 /{BotCommands.HelpCommand} 调出全息控制面板，体验用玩具级操作完成星际数据中心才能实现的跨维传输！
+🔮发送分享链接URL
+请粘贴并发送你想要解析的视频分享链接
 """
     try:
         _is_auth = await CustomFilters.authorized(_, message)
@@ -27,10 +26,12 @@ async def start(_, message):
         _is_auth = False
     if _is_auth:
         start_string = f"""
-        恭喜已获得授权✅\n\n
+        我们开始对话吧✅\n\n
 {start_string}
 """
-        reply = await send_message(message, start_string, reply_markup)
+        # reply = await send_message(message, start_string, reply_markup)
+        reply = await send_message(message, start_string)
+
         await auto_delete_message(message, reply, delay=20)
     else:
         # 量子态信息流拼接术（采用超弦格式化）
@@ -38,7 +39,7 @@ async def start(_, message):
         reply = await send_message(
             message,
             f"{start_string}{auth_alert}",  # 用超维字符串焊接术
-            reply_markup,
+            # reply_markup,
         )
         await auto_delete_message(message, reply, delay=20)
 
