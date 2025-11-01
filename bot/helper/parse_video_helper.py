@@ -387,16 +387,28 @@ async def parse_video_v2_api(url: str, timeout: int = None) -> Optional[Dict[str
                         return {'name': a}
                     return {'name': ''}
 
+                # 从 endpoint 识别平台
+                platform = 'unknown'
+                if 'weibo' in endpoint:
+                    platform = 'weibo'
+                elif 'douyin' in endpoint or 'tiktok' in endpoint:
+                    platform = 'douyin'
+                elif 'bilibili' in endpoint:
+                    platform = 'bilibili'
+                elif 'xiaohongshu' in endpoint or 'xhs' in endpoint:
+                    platform = 'xiaohongshu'
+                
                 normalized = {
                     'video_url': pick_url(data),
                     'title': data.get('title') or data.get('name') or data.get('desc') or '',
                     'author': pick_author(data),
                     'cover_url': data.get('cover_url') or data.get('cover') or data.get('pic') or '',
                     'images': pick_images(data),
+                    'platform': platform,
                 }
                 if not normalized.get('video_url') and not normalized.get('images'):
                     return None
-                LOGGER.info(f"ParseV2 API {endpoint} success: {normalized.get('title', 'Unknown')}")
+                LOGGER.info(f"ParseV2 API {endpoint} success: {normalized.get('title', 'Unknown')} [platform: {platform}]")
                 return normalized
         except aiohttp.ClientError as e:
             LOGGER.warning(f"ParseV2 API {endpoint} request failed: {e}")
@@ -517,6 +529,277 @@ async def parse_weixin_article(url: str, timeout: int = 30) -> Optional[Dict[str
                 
     except Exception as e:
         LOGGER.error(f"Weixin article parse error: {e}")
+        import traceback
+        LOGGER.error(traceback.format_exc())
+        return None
+
+
+async def parse_weibo_ajax(url: str) -> Optional[Dict[str, Any]]:
+    """
+    使用微博 Ajax API 解析微博内容（视频/图集）
+    基于 ParseHub 项目的实现
+    
+    支持:
+    - 视频 (video)
+    - 图片 (photo)
+    - LivePhoto
+    - GIF
+    - 混合媒体
+    
+    Args:
+        url: 微博链接
+        
+    Returns:
+        {
+            'video_url': str,  # 视频URL（如果是视频）
+            'images': list,    # 图片列表（如果是图集）
+            'title': str,      # 标题/描述
+            'author': {'name': str},
+            'cover_url': str,  # 封面
+            'platform': 'weibo'
+        }
+    """
+    try:
+        # 提取微博ID (bid) - 支持多种URL格式
+        from urllib.parse import urlparse, parse_qs
+        import re
+        
+        parsed = urlparse(url)
+        bid = None
+        
+        LOGGER.info(f"Parsing Weibo URL: {url}")
+        
+        # 格式1: https://weibo.com/用户ID/微博ID
+        # 格式2: https://m.weibo.cn/status/微博ID
+        if '/status/' in url or re.search(r'/\d+/\w+', url):
+            bid = url.split("/")[-1].split("?")[0]
+            LOGGER.info(f"Format 1/2 detected, extracted bid: {bid}")
+        
+        # 格式3: https://video.weibo.com/show?fid=1034:xxx
+        elif 'video.weibo.com/show' in url or 'h5.video.weibo.com' in url:
+            LOGGER.info(f"Format 3 detected (video.weibo.com/show)")
+            query_params = parse_qs(parsed.query)
+            LOGGER.info(f"Query params: {query_params}")
+            if 'fid' in query_params:
+                fid = query_params['fid'][0]
+                LOGGER.info(f"Found fid parameter: {fid}")
+                # fid格式: 1034:4xxxxx，提取后面的数字部分
+                if ':' in fid:
+                    bid = fid.split(':')[1]
+                    LOGGER.info(f"Extracted bid from fid: {bid}")
+            else:
+                # 如果没有fid，尝试访问页面提取真实ID
+                LOGGER.info(f"Weibo video URL without fid, trying to extract from page: {url}")
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                            if resp.status == 200:
+                                html = await resp.text()
+                                # 从HTML中提取微博ID (通常在 $render_data 变量中)
+                                match = re.search(r'"id"[:\s]+"?(\d+)"?', html)
+                                if match:
+                                    bid = match.group(1)
+                                    LOGGER.info(f"Extracted bid from page: {bid}")
+                except Exception as e:
+                    LOGGER.warning(f"Failed to extract bid from page: {e}")
+        
+        # 验证 bid
+        LOGGER.info(f"Final extracted bid: {bid}, type: {type(bid)}, is_digit: {bid.isdigit() if bid else 'N/A'}, len: {len(bid) if bid else 0}")
+        if not bid:
+            LOGGER.warning(f"Empty Weibo bid from URL: {url}")
+            return None
+        # bid应该是纯数字（长bid如16位）或长度为9的短bid
+        if not bid.isdigit():
+            LOGGER.warning(f"Invalid Weibo bid (not digits): {bid} from URL: {url}")
+            return None
+        
+        # 微博 Ajax API
+        api_url = f"https://weibo.com/ajax/statuses/show?id={bid}"
+        LOGGER.info(f"Calling Weibo Ajax API: {api_url}")
+        headers = {
+            "referer": "https://weibo.com",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+        cookies = {
+            "SUB": "_2AkMR47Mlf8NxqwFRmfocxG_lbox2wg7EieKnv0L-JRMxHRl-yT9yqhFdtRB6OmOdyoia9pKPkqoHRRmSBA_WNPaHuybH",
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                api_url,
+                headers=headers,
+                cookies=cookies,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
+                if resp.status != 200:
+                    LOGGER.warning(f"Weibo Ajax API status {resp.status}")
+                    return None
+                
+                data = await resp.json()
+                LOGGER.info(f"Weibo Ajax API full response keys: {list(data.keys())}")
+                
+                # 检查是否为错误响应
+                if data.get('ok') == 0 or 'error_code' in data:
+                    error_msg = data.get('message', 'Unknown error')
+                    error_code = data.get('error_code', 'N/A')
+                    LOGGER.warning(f"Weibo Ajax API error: code={error_code}, message={error_msg}")
+                    LOGGER.info(f"Trying to convert bid format or access page HTML...")
+                    
+                    # 尝试访问原始URL的页面来提取真实ID
+                    try:
+                        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as page_resp:
+                            if page_resp.status == 200:
+                                # 读取原始字节，尝试多种编码
+                                raw_html = await page_resp.read()
+                                html = None
+                                for encoding in ['utf-8', 'gb2312', 'gbk', 'gb18030']:
+                                    try:
+                                        html = raw_html.decode(encoding)
+                                        LOGGER.info(f"HTML decoded successfully with {encoding}")
+                                        break
+                                    except (UnicodeDecodeError, LookupError):
+                                        continue
+                                
+                                if html:
+                                    # 从HTML中提取微博ID
+                                    import re
+                                    # 查找 $render_data 中的 status id
+                                    match = re.search(r'"(?:status|id)"[^}]*?"id"[:\s]+"?(\d+)"?', html)
+                                    if match:
+                                        new_bid = match.group(1)
+                                        LOGGER.info(f"Extracted new bid from HTML: {new_bid}")
+                                        if new_bid != bid:
+                                            # 用新的 bid 重新请求
+                                            api_url = f"https://weibo.com/ajax/statuses/show?id={new_bid}"
+                                            async with session.get(api_url, headers=headers, cookies=cookies, timeout=aiohttp.ClientTimeout(total=30)) as retry_resp:
+                                                if retry_resp.status == 200:
+                                                    data = await retry_resp.json()
+                                                    LOGGER.info(f"Retry with new bid success: {new_bid}")
+                    except Exception as e:
+                        LOGGER.warning(f"Failed to extract from HTML: {e}")
+                
+                LOGGER.info(f"Weibo Ajax API response: id={data.get('id')}, has_page_info={bool(data.get('page_info'))}, has_pic_infos={bool(data.get('pic_infos'))}, has_mix_media={bool(data.get('mix_media_info'))}")
+        
+        # 解析返回数据
+        if not data or data.get('ok') == 0:
+            return None
+        
+        # 提取基本信息
+        text_raw = data.get('text_raw', '')
+        text = data.get('text', '')
+        author_name = data.get('user', {}).get('screen_name', '未知')
+        
+        # 清理文本
+        page_info = data.get('page_info')
+        if page_info and page_info.get('short_url'):
+            text_raw = text_raw.replace(page_info['short_url'], '').strip()
+        
+        result = {
+            'title': text_raw or '微博视频',
+            'author': {'name': author_name},
+            'platform': 'weibo'
+        }
+        
+        # 检查是否为视频类型
+        pic_infos = data.get('pic_infos')
+        mix_media_info = data.get('mix_media_info')
+        
+        # 情况1: 单个视频 (page_info.object_type == 'video')
+        if page_info and page_info.get('object_type') == 'video':
+            media_info = page_info.get('media_info', {})
+            video_url = media_info.get('mp4_hd_url') or media_info.get('mp4_sd_url')
+            cover_url = page_info.get('page_pic')
+            
+            if video_url:
+                result['video_url'] = video_url
+                result['cover_url'] = cover_url
+                LOGGER.info(f"Weibo Ajax: video parsed - {text_raw[:50]}")
+                return result
+        
+        # 情况2: 图集或混合媒体
+        media_items = []
+        
+        # 优先处理 mix_media_info (混合媒体)
+        if mix_media_info and mix_media_info.get('items'):
+            for item in mix_media_info['items']:
+                item_type = item.get('type')
+                item_data = item.get('data', {})
+                
+                if item_type == 'video':
+                    # 视频
+                    media_info = item_data.get('media_info', {})
+                    video_url = media_info.get('mp4_hd_url') or media_info.get('mp4_sd_url')
+                    if video_url:
+                        media_items.append({'type': 'video', 'url': video_url})
+                elif item_type == 'pic':
+                    # 图片
+                    largest = item_data.get('largest', {})
+                    pic_url = largest.get('url')
+                    if pic_url:
+                        media_items.append({'type': 'image', 'url': pic_url})
+        
+        # 处理 pic_infos (纯图集)
+        elif pic_infos:
+            for pic_id, pic_data in pic_infos.items():
+                pic_type = pic_data.get('type')
+                
+                if pic_type == 'pic':
+                    # 普通图片
+                    largest = pic_data.get('largest', {})
+                    pic_url = largest.get('url')
+                    if pic_url:
+                        media_items.append({'type': 'image', 'url': pic_url})
+                elif pic_type == 'livephoto':
+                    # LivePhoto - 只取静态图部分，统一作为图片处理
+                    largest = pic_data.get('largest', {})
+                    pic_url = largest.get('url')
+                    if pic_url:
+                        media_items.append({'type': 'image', 'url': pic_url})
+                        LOGGER.info(f"LivePhoto detected, using static image: {pic_url}")
+                elif pic_type == 'gif':
+                    # GIF - 取视频URL
+                    video_url = pic_data.get('video')
+                    if video_url:
+                        media_items.append({'type': 'gif', 'url': video_url})
+        
+        # 检查转发微博
+        if not media_items:
+            retweeted_status = data.get('retweeted_status')
+            if retweeted_status and retweeted_status.get('pic_infos'):
+                for pic_id, pic_data in retweeted_status['pic_infos'].items():
+                    largest = pic_data.get('largest', {})
+                    pic_url = largest.get('url')
+                    if pic_url:
+                        media_items.append({'type': 'image', 'url': pic_url})
+        
+        # 分类处理媒体
+        if media_items:
+            # 检查是否全是图片
+            all_images = all(item['type'] == 'image' for item in media_items)
+            
+            if all_images:
+                # 纯图集
+                result['images'] = [item['url'] for item in media_items]
+                LOGGER.info(f"Weibo Ajax: {len(result['images'])} images parsed")
+            else:
+                # 混合或视频
+                videos = [item['url'] for item in media_items if item['type'] in ('video', 'gif')]
+                images = [item['url'] for item in media_items if item['type'] == 'image']
+                
+                if videos:
+                    result['video_url'] = videos[0]  # 取第一个视频
+                if images:
+                    result['images'] = images
+                
+                LOGGER.info(f"Weibo Ajax: mixed media - {len(videos)} videos, {len(images)} images")
+            
+            return result
+        
+        LOGGER.warning("Weibo Ajax: no media found")
+        return None
+        
+    except Exception as e:
+        LOGGER.error(f"Weibo Ajax parse error: {e}")
         import traceback
         LOGGER.error(traceback.format_exc())
         return None

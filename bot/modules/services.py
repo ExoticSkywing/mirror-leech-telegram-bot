@@ -26,7 +26,7 @@ async def start(_, message):
         _is_auth = False
     if _is_auth:
         start_string = f"""
-        我们开始对话吧✅\n\n
+        💡 使用说明\n
 {start_string}
 """
         # reply = await send_message(message, start_string, reply_markup)

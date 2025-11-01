@@ -167,18 +167,25 @@ class VideoLinkProcessor(TaskListener):
                 LOGGER.info("Detected Weixin article, using local parser")
                 parse_result = await parse_weixin_article(self.url)
             
-            # 如果不是微信或解析失败，尝试API
+            # 检查微博（使用 Ajax API，基于 ParseHub）
+            if not parse_result and (domain in {"weibo.com", "weibo.cn", "m.weibo.cn", "video.weibo.com", "h5.video.weibo.com"} 
+                                      or domain.endswith("weibo.com") or domain.endswith("weibo.cn")):
+                LOGGER.info("Detected Weibo, using Ajax API parser")
+                from bot.helper.parse_video_helper import parse_weibo_ajax
+                parse_result = await parse_weibo_ajax(self.url)
+            
+            # 如果不是微信/微博或解析失败，尝试其他API
             if not parse_result:
-            if prefer_v2:
-                # 新接口优先
-                parse_result = await parse_video_v2_api(self.url)
-                if not parse_result:
-                    parse_result = await parse_video_api(self.url)
-            else:
-                # 旧接口优先
-                parse_result = await parse_video_api(self.url)
-                if not parse_result:
+                if prefer_v2:
+                    # 新接口优先
                     parse_result = await parse_video_v2_api(self.url)
+                    if not parse_result:
+                        parse_result = await parse_video_api(self.url)
+                else:
+                    # 旧接口优先
+                    parse_result = await parse_video_api(self.url)
+                    if not parse_result:
+                        parse_result = await parse_video_v2_api(self.url)
 
             if parse_result:
                 # Parse-Video解析成功
@@ -347,6 +354,22 @@ class VideoLinkProcessor(TaskListener):
                 "cookiefile": "cookies.txt",
                 "merge_output_format": "mkv",
             }
+            
+            # 如果是微博视频，添加防盗链headers和扩展名
+            if video_info and video_info.get('platform') == 'weibo':
+                options['http_headers'] = {
+                    'Referer': 'https://weibo.com/',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                }
+                
+                # 检查原始URL（self.url）而不是下载URL，因为ParseV2返回的是直链
+                original_url = self.url if hasattr(self, 'url') else url
+                # 如果是 /show 链接或视频直链，确保文件名有扩展名
+                if self.name and not self.name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv')):
+                    self.name = f"{self.name}.mp4"
+                    LOGGER.info(f"Appended .mp4 extension for Weibo video: {self.name}")
+                
+                LOGGER.info("Added Weibo anti-hotlinking headers for yt-dlp")
 
             # 先提取视频信息（测试链接是否有效）
             from bot.modules.ytdlp import extract_info
@@ -783,14 +806,14 @@ class VideoLinkProcessor(TaskListener):
         
         if use_cache:
             # 先检查画廊是否已存在
-        await edit_message(
-            self.status_msg,
+            await edit_message(
+                self.status_msg,
                 f"🔍 检查画廊缓存...\n"
                 f"📸 {len(images_list)} 张图片\n"
-            f"📝 {video_info.get('title', '图集')[:50]}"
-        )
-        
-        try:
+                f"📝 {video_info.get('title', '图集')[:50]}"
+            )
+            
+            try:
                 async with aiohttp.ClientSession() as session:
                     check_url = f"{worker_api.rstrip('/')}/api/check/{gallery_id}"
                     async with session.get(
@@ -815,7 +838,7 @@ class VideoLinkProcessor(TaskListener):
                 # 检测是否包含GIF
                 has_gif = self._contains_gif(images_list)
                 
-            buttons = ButtonMaker()
+                buttons = ButtonMaker()
                 buttons.url_button("🎨 在线画廊", gallery_url)
                 
                 # 如果包含GIF，不显示批量下载按钮
@@ -839,10 +862,10 @@ class VideoLinkProcessor(TaskListener):
                         f"\n\n"
                         f"⚠️ <b>包含GIF图片</b>\n"
                         f"💡 请使用在线画廊查看和下载"
-            )
-            
-            await edit_message(
-                self.status_msg,
+                    )
+                
+                await edit_message(
+                    self.status_msg,
                     msg_text,
                     buttons=buttons.build_menu(2) if not has_gif else buttons.build_menu(1)
                 )
@@ -1606,7 +1629,7 @@ class VideoLinkProcessor(TaskListener):
         semaphore = asyncio.Semaphore(max_concurrent)
         
         async def download_single_image(idx, image_data):
-            """使用yt-dlp下载单张图片"""
+            """下载单张图片（支持微博直接下载 + yt-dlp备用）"""
             if self.is_cancelled:
                 return None
 
@@ -1617,34 +1640,79 @@ class VideoLinkProcessor(TaskListener):
             async with semaphore:
                 try:
                     temp_output = ospath.join(temp_dir, f'temp_{idx:03d}')
+                    temp_file = None
                     
-                    cmd = [
-                        'yt-dlp',
-                        '--no-warnings',
-                        '--quiet',
-                        '-o', f'{temp_output}.%(ext)s',
-                        image_url
-                    ]
+                    # 检测是否为微博图片（需要特殊headers）
+                    from urllib.parse import urlparse
+                    parsed = urlparse(image_url)
+                    is_weibo_image = any(domain in parsed.netloc for domain in ['sinaimg.cn', 'weibo.com', 'sina.com'])
                     
-                    result = await sync_to_async(
-                        subprocess.run,
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=60
-                    )
+                    if is_weibo_image:
+                        # 使用 httpx 直接下载微博图片（带正确的 headers）
+                        import httpx
+                        headers = {
+                            'Referer': 'https://weibo.com/',
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                        }
+                        
+                        async with httpx.AsyncClient(headers=headers) as client:
+                            resp = await client.get(image_url, timeout=30.0)
+                            if resp.status_code == 200:
+                                # 根据Content-Type判断文件扩展名
+                                content_type = resp.headers.get('Content-Type', '')
+                                if 'gif' in content_type:
+                                    ext = '.gif'
+                                elif 'png' in content_type:
+                                    ext = '.png'
+                                else:
+                                    ext = '.jpg'
+                                
+                                temp_file = f'{temp_output}{ext}'
+                                
+                                # 写入文件（使用 asyncio.to_thread）
+                                def _write():
+                                    with open(temp_file, 'wb') as f:
+                                        f.write(resp.content)
+                                
+                                import asyncio
+                                await asyncio.to_thread(_write)
+                                LOGGER.info(f"Image {idx + 1}: Downloaded via httpx (Weibo)")
+                            else:
+                                LOGGER.error(f"Image {idx + 1}: HTTP {resp.status_code}")
+                                return None
+                    else:
+                        # 使用 yt-dlp 下载其他平台图片
+                        cmd = [
+                            'yt-dlp',
+                            '--no-warnings',
+                            '--quiet',
+                            '-o', f'{temp_output}.%(ext)s',
+                            image_url
+                        ]
+                        
+                        result = await sync_to_async(
+                            subprocess.run,
+                            cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=60
+                        )
+                        
+                        if result.returncode != 0:
+                            LOGGER.error(f"Image {idx + 1}: yt-dlp failed")
+                            return None
+                        
+                        import glob
+                        downloaded_files = glob.glob(f'{temp_output}.*')
+                        
+                        if not downloaded_files:
+                            return None
+                        
+                        temp_file = downloaded_files[0]
                     
-                    if result.returncode != 0:
-                        LOGGER.error(f"Image {idx + 1}: yt-dlp failed")
+                    # 验证文件是否存在
+                    if not temp_file or not ospath.exists(temp_file):
                         return None
-                    
-                    import glob
-                    downloaded_files = glob.glob(f'{temp_output}.*')
-                    
-                    if not downloaded_files:
-                        return None
-                    
-                    temp_file = downloaded_files[0]
                     
                     # 检测文件扩展名
                     file_ext = ospath.splitext(temp_file)[1].lower()
@@ -1653,18 +1721,16 @@ class VideoLinkProcessor(TaskListener):
                     if file_ext == '.gif':
                         final_path = ospath.join(temp_dir, f"image_{idx:03d}.gif")
                         # 直接移动文件，不转换
-                        def keep_gif():
-                            import shutil
-                            shutil.move(temp_file, final_path)
-                        
-                        await sync_to_async(keep_gif)
+                        import shutil
+                        import asyncio
+                        await asyncio.to_thread(shutil.move, temp_file, final_path)
                         LOGGER.info(f"Image {idx + 1}: Kept as GIF (animated)")
                     else:
                         # 非GIF图片转换为JPG
                         final_path = ospath.join(temp_dir, f"image_{idx:03d}.jpg")
                         
-                        def convert_image():
-                            from PIL import Image
+                        from PIL import Image
+                        def _convert():
                             img = Image.open(temp_file)
                             if img.mode in ('RGBA', 'LA', 'P'):
                                 background = Image.new('RGB', img.size, (255, 255, 255))
@@ -1676,7 +1742,8 @@ class VideoLinkProcessor(TaskListener):
                                 img = img.convert('RGB')
                             img.save(final_path, 'JPEG', quality=95)
                         
-                        await sync_to_async(convert_image)
+                        import asyncio
+                        await asyncio.to_thread(_convert)
                     
                     try:
                         await aioremove(temp_file)
@@ -2278,8 +2345,8 @@ async def handle_manual_tg_upload(client, query):
         try:
             from bot.helper.telegram_helper.message_utils import edit_message
             await edit_message(query.message, f"❌ 上传失败：{str(e)[:100]}")
-    except Exception:
-        pass
+        except Exception:
+            pass
 
 
 @new_task
