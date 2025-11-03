@@ -424,7 +424,12 @@ class TaskConfig:
                         if self.user_transmission:
                             self.hybrid_leech = False
                         else:
-                            raise ValueError("Chat not found!")
+                            # 如果是 leech 模式且找不到目标群，降级到当前对话
+                            if self.is_leech:
+                                LOGGER.warning(f"Chat {self.up_dest} not found, falling back to current chat")
+                                self.up_dest = self.message.chat.id
+                            else:
+                                raise ValueError("Chat not found!")
                     else:
                         uploader_id = self.client.me.id
                         if chat.type.name in ["SUPERGROUP", "CHANNEL", "GROUP"]:

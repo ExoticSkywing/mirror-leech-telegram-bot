@@ -16,6 +16,7 @@ from bot.core.config_manager import Config
 from bot.helper.ext_utils.bot_utils import new_task, sync_to_async
 from bot.helper.ext_utils.files_utils import clean_target
 from bot.helper.ext_utils.url_utils import get_domain
+from bot.helper.ext_utils.media_utils import download_thumbnail_from_url
 from bot.helper.parse_video_helper import parse_video_api, parse_video_v2_api, format_video_info, parse_weixin_article
 from bot.helper.listeners.task_listener import TaskListener
 from bot.helper.mirror_leech_utils.download_utils.yt_dlp_download import YoutubeDLHelper
@@ -93,6 +94,8 @@ class VideoLinkProcessor(TaskListener):
             self.private_dump = False
 
         if dest_chat:
+            # 使用 h: 混合模式：小文件用 Bot，大文件用 User（需要 USER_SESSION_STRING）
+            # 如果目标频道无法访问，会降级到当前对话（fallback in common.py）
             self.up_dest = f"h:{dest_chat}"
         else:
             self.up_dest = None
@@ -340,7 +343,16 @@ class VideoLinkProcessor(TaskListener):
                         self.name = base
                     self.lock_name = True
                 if video_info.get("cover_url"):
-                    self.thumb = video_info["cover_url"]
+                    # 从 URL 下载封面到本地
+                    thumb_path = await download_thumbnail_from_url(
+                        video_info["cover_url"],
+                        str(self.user_id)
+                    )
+                    if thumb_path:
+                        self.thumb = thumb_path
+                        LOGGER.info(f"Downloaded cover thumbnail: {ospath.basename(thumb_path)}")
+                    else:
+                        LOGGER.warning("Failed to download cover thumbnail, will use default")
 
             # 更新状态
             await edit_message(
@@ -397,8 +409,33 @@ class VideoLinkProcessor(TaskListener):
             domain = get_domain(self.url)
             short_video_domains = {"douyin.com", "iesdouyin.com", "tiktok.com", "kuaishou.com", "v.kuaishou.com", "xiaohongshu.com", "xhslink.com", "ixigua.com"}
             large_video_domains = {"youtube.com", "youtu.be", "bilibili.com"}
+            
+            # 检测 YouTube Music - 应该下载为音频
+            is_youtube_music = domain == "music.youtube.com" or (
+                domain in {"youtube.com", "youtu.be"} and 
+                "music" in url.lower()
+            )
 
-            if domain in short_video_domains:
+            if is_youtube_music:
+                # YouTube Music: 自动选择最高质量 MP3（模拟点击 MP3 -> 320K-mp3）
+                # 等效于 /yl 命令中选择 "MP3" 按钮，然后选择 "320K-mp3"
+                LOGGER.info("Detected YouTube Music, auto-selecting highest quality MP3 (320K)")
+                qual = "ba/b-mp3-320"  # YoutubeDLHelper 会自动解析并添加 FFmpeg 后处理器
+                
+                # 不锁定文件名，让 yt-dlp 自动处理（包括封面嵌入）
+                # yt-dlp 会自动：
+                # 1. 下载缩略图
+                # 2. 转换为 MP3
+                # 3. 使用 EmbedThumbnail 将封面嵌入到 MP3 文件
+                # 4. 上传时自动从 MP3 文件提取封面
+                if self.name and video_info and video_info.get("title"):
+                    # 如果有 Parse-Video 的标题，使用它但不锁定
+                    if not self.name.lower().endswith((".mp3", ".m4a", ".flac", ".ogg", ".opus")):
+                        self.name = f"{self.name}.mp3"
+                    LOGGER.info(f"Suggested audio filename: {self.name} (not locked)")
+                # 不设置 lock_name，让 yt-dlp 可以更新文件名
+                
+            elif domain in short_video_domains:
                 preferred_qual = "bestvideo+bestaudio/best"
             elif domain in {"youtube.com", "youtu.be"}:
                 # YouTube：严格匹配“1080p30.0-mp4”按钮对应的视频流 → format_id + ba[ext=m4a]
@@ -445,18 +482,22 @@ class VideoLinkProcessor(TaskListener):
 
             # 针对直链/单一流（Generic 提取器）进行自适应：若只有单一可下载格式，则使用 'best'
             formats = result.get("formats") or []
-            if not formats or len(formats) <= 1:
-                qual = "best"
-            else:
-                # 检测是否存在仅视频或仅音频分离流
-                has_video_only = any((f.get("vcodec") or "none") != "none" and (f.get("acodec") or "none") == "none" for f in formats)
-                has_audio_only = any((f.get("acodec") or "none") != "none" and (f.get("vcodec") or "none") == "none" for f in formats)
-                has_progressive = any((f.get("vcodec") or "none") != "none" and (f.get("acodec") or "none") != "none" for f in formats)
-                if has_progressive and not (has_video_only and has_audio_only):
-                    # 只有合流可选，用 best 最稳妥
+            
+            # YouTube Music 已经设置了 qual，跳过视频质量选择
+            if not is_youtube_music:
+                if not formats or len(formats) <= 1:
                     qual = "best"
                 else:
-                    qual = preferred_qual
+                    # 检测是否存在仅视频或仅音频分离流
+                    has_video_only = any((f.get("vcodec") or "none") != "none" and (f.get("acodec") or "none") == "none" for f in formats)
+                    has_audio_only = any((f.get("acodec") or "none") != "none" and (f.get("vcodec") or "none") == "none" for f in formats)
+                    has_progressive = any((f.get("vcodec") or "none") != "none" and (f.get("acodec") or "none") != "none" for f in formats)
+                    if has_progressive and not (has_video_only and has_audio_only):
+                        # 只有合流可选，用 best 最稳妥
+                        qual = "best"
+                    else:
+                        qual = preferred_qual
+            
             playlist = "entries" in result
 
             await ydl.add_download(self.download_path, qual, playlist, options)

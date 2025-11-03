@@ -11,11 +11,65 @@ from os import path as ospath
 from re import search as re_search, escape
 from time import time
 from aioshutil import rmtree
+import aiohttp
+import aiofiles
 
 from ... import LOGGER, cpu_no, DOWNLOAD_DIR
 from .bot_utils import cmd_exec, sync_to_async
 from .files_utils import get_mime_type, is_archive, is_archive_split
 from .status_utils import time_to_seconds
+
+
+async def download_thumbnail_from_url(url: str, user_id: str = None) -> str:
+    """
+    从 URL 下载缩略图并保存为本地文件
+    
+    Args:
+        url: 图片 URL
+        user_id: 用户 ID（可选，用于生成文件名）
+    
+    Returns:
+        本地文件路径，失败返回 None
+    """
+    try:
+        output_dir = f"{DOWNLOAD_DIR}thumbnails"
+        await makedirs(output_dir, exist_ok=True)
+        
+        # 生成唯一文件名
+        filename = f"{user_id}_{time()}.jpg" if user_id else f"{time()}.jpg"
+        output = ospath.join(output_dir, filename)
+        
+        # 下载图片
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    LOGGER.warning(f"Failed to download thumbnail from {url}, status: {resp.status}")
+                    return None
+                
+                # 保存到本地
+                async with aiofiles.open(output, 'wb') as f:
+                    await f.write(await resp.read())
+        
+        # 验证文件存在且有效
+        if await aiopath.exists(output):
+            try:
+                # 尝试打开图片确保格式正确，并转换为 JPEG
+                await sync_to_async(
+                    lambda: Image.open(output).convert("RGB").save(output, "JPEG")
+                )
+                LOGGER.info(f"Downloaded and converted thumbnail: {ospath.basename(output)}")
+                return output
+            except Exception as e:
+                LOGGER.error(f"Failed to process downloaded thumbnail: {e}")
+                await remove(output)
+                return None
+        else:
+            return None
+            
+    except Exception as e:
+        LOGGER.error(f"Error downloading thumbnail from {url}: {e}")
+        return None
 
 
 async def create_thumb(msg, _id=""):
@@ -222,13 +276,19 @@ async def get_audio_thumbnail(audio_file):
     try:
         _, err, code = await wait_for(cmd_exec(cmd), timeout=60)
         if code != 0 or not await aiopath.exists(output):
-            LOGGER.error(
-                f"Error while extracting thumbnail from audio. Name: {audio_file} stderr: {err}"
-            )
+            # 音频文件可能没有嵌入封面，这是正常的，降级为 DEBUG 日志
+            if "does not contain any stream" in err:
+                LOGGER.debug(
+                    f"Audio file has no embedded thumbnail: {ospath.basename(audio_file)}"
+                )
+            else:
+                LOGGER.warning(
+                    f"Failed to extract thumbnail from audio: {ospath.basename(audio_file)}"
+                )
             return None
     except:
-        LOGGER.error(
-            f"Error while extracting thumbnail from audio. Name: {audio_file}. Error: Timeout some issues with ffmpeg with specific arch!"
+        LOGGER.warning(
+            f"Timeout while extracting audio thumbnail: {ospath.basename(audio_file)}"
         )
         return None
     return output

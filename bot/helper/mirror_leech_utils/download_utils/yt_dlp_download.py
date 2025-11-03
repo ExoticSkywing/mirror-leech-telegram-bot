@@ -311,14 +311,24 @@ class YoutubeDLHelper:
             ".mov",
             ".m4v",
         ]:
-            self.opts["postprocessors"].append(
-                {
-                    "already_have_thumbnail": bool(
-                        self._listener.is_leech and not self._listener.thumbnail_layout
-                    ),
-                    "key": "EmbedThumbnail",
-                }
-            )
+            # 对于音频格式（特别是 ba/b- 提取的），不使用 already_have_thumbnail
+            # 让 yt-dlp 自己下载并嵌入缩略图，避免文件名不匹配问题
+            if qual.startswith("ba/b"):
+                self.opts["postprocessors"].append(
+                    {
+                        "already_have_thumbnail": False,
+                        "key": "EmbedThumbnail",
+                    }
+                )
+            else:
+                self.opts["postprocessors"].append(
+                    {
+                        "already_have_thumbnail": bool(
+                            self._listener.is_leech and not self._listener.thumbnail_layout
+                        ),
+                        "key": "EmbedThumbnail",
+                    }
+                )
         elif not self._listener.is_leech:
             self.opts["writethumbnail"] = False
 

@@ -338,6 +338,13 @@ class TelegramUploader:
         ):
             self._thumb = None
         thumb = self._thumb
+        # 修复缩略图参数问题：
+        # 某些情况下 self._thumb 可能是字符串 "none" 而不是 Python 的 None 对象
+        # 这会导致后续的 "if thumb is None" 条件判断失败，跳过缩略图提取逻辑
+        # 例如：YouTube Music 下载的音频文件已嵌入封面，但上传时无法正确提取显示
+        # 因此需要在这里统一转换，确保后续逻辑正常工作
+        if thumb == "none":
+            thumb = None
         self._is_corrupted = False
         try:
             is_video, is_audio, is_image = await get_document_type(self._up_path)
