@@ -35,7 +35,7 @@ async def start(_, message):
         await auto_delete_message(message, reply, delay=20)
     else:
         # 量子态信息流拼接术（采用超弦格式化）
-        auth_alert = "\n\n🚨 量子盾告警 🛸\n⚠️ 未授权用户！请联系作者拥有此机器人\n▸ 源码星门：https://t.me/nebuluxe"
+        auth_alert = "快发送并尽情享用吧~"
         reply = await send_message(
             message,
             f"{start_string}{auth_alert}",  # 用超维字符串焊接术
