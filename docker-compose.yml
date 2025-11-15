@@ -6,4 +6,4 @@ services:
     network_mode: "host"
     volumes:
       - ./config.py:/usr/src/app/config.py:ro
-      #- ./cookies.txt:/usr/src/app/cookies.txt:ro
+      - ./cookies.txt:/usr/src/app/cookies.txt:rw

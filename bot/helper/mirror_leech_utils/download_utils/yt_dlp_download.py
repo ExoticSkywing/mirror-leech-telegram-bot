@@ -139,13 +139,34 @@ class YoutubeDLHelper:
     def _extract_meta_data(self):
         if self._listener.link.startswith(("rtmp", "mms", "rstp", "rtmps")):
             self.opts["external_downloader"] = "ffmpeg"
-        with YoutubeDL(self.opts) as ydl:
-            try:
-                result = ydl.extract_info(self._listener.link, download=False)
-                if result is None:
-                    raise ValueError("Info result is None")
-            except Exception as e:
-                return self._on_download_error(str(e))
+
+        # 与实际下载阶段保持一致：如果指定的 format 在此阶段不可用，回退到 'best' 再试一次
+        tried_format_fallback = False
+        while True:
+            with YoutubeDL(self.opts) as ydl:
+                try:
+                    result = ydl.extract_info(self._listener.link, download=False)
+                    if result is None:
+                        raise ValueError("Info result is None")
+                    break
+                except DownloadError as e:
+                    msg = str(e)
+                    if (
+                        not tried_format_fallback
+                        and (
+                            "Requested format is not available" in msg
+                            or "format is not available" in msg
+                        )
+                    ):
+                        tried_format_fallback = True
+                        LOGGER.warning(
+                            "YT-DLP format not available during metadata extraction, falling back to 'best'"
+                        )
+                        self.opts["format"] = "best"
+                        continue
+                    return self._on_download_error(msg)
+                except Exception as e:
+                    return self._on_download_error(str(e))
             if "entries" in result:
                 for entry in result["entries"]:
                     if not entry:
@@ -178,13 +199,34 @@ class YoutubeDLHelper:
 
     def _download(self, path):
         try:
-            with YoutubeDL(self.opts) as ydl:
-                try:
-                    ydl.download([self._listener.link])
-                except DownloadError as e:
-                    if not self._listener.is_cancelled:
-                        self._on_download_error(str(e))
-                    return
+            # 通用兜底：如果指定的 format 不可用，则自动回退到 'best' 再重试一次
+            tried_format_fallback = False
+            while True:
+                with YoutubeDL(self.opts) as ydl:
+                    try:
+                        ydl.download([self._listener.link])
+                        break
+                    except DownloadError as e:
+                        msg = str(e)
+                        # 只针对格式不可用的错误做一次兜底重试
+                        if (
+                            not tried_format_fallback
+                            and (
+                                "Requested format is not available" in msg
+                                or "format is not available" in msg
+                            )
+                        ):
+                            tried_format_fallback = True
+                            LOGGER.warning(
+                                "YT-DLP format not available, falling back to 'best' format for download"
+                            )
+                            # 回退到最稳妥的 'best'，交由 yt-dlp 自行选择合适流
+                            self.opts["format"] = "best"
+                            continue
+
+                        if not self._listener.is_cancelled:
+                            self._on_download_error(msg)
+                        return
             if self.is_playlist and (
                 not ospath.exists(path) or len(listdir(path)) == 0
             ):
@@ -245,48 +287,57 @@ class YoutubeDLHelper:
         if self._listener.is_cancelled:
             return
 
-        base_name, ext = ospath.splitext(self._listener.name)
-        trim_name = self._listener.name if self.is_playlist else base_name
-        if len(trim_name.encode()) > 200:
-            self._listener.name = (
-                self._listener.name[:200]
-                if self.is_playlist
-                else f"{base_name[:200]}{ext}"
-            )
-            base_name = ospath.splitext(self._listener.name)[0]
+        base_name, ext = ospath.splitext(self._listener.name) if self._listener.name else ("", "")
 
-        if self.is_playlist:
+        # 如果仍然没有文件名（例如部分站点元数据缺失），使用通用模版，避免输出路径变成纯目录
+        if not self._listener.name:
+            generic_name_tmpl = "%(title,fulltitle,alt_title)s"  # yt-dlp 会自行处理占位符
             self.opts["outtmpl"] = {
-                "default": f"{path}/{self._listener.name}/%(title,fulltitle,alt_title)s%(season_number& |)s%(season_number&S|)s%(season_number|)02d%(episode_number&E|)s%(episode_number|)02d%(height& |)s%(height|)s%(height&p|)s%(fps|)s%(fps&fps|)s%(tbr& |)s%(tbr|)d.%(ext)s",
-                "thumbnail": f"{path}/yt-dlp-thumb/%(title,fulltitle,alt_title)s%(season_number& |)s%(season_number&S|)s%(season_number|)02d%(episode_number&E|)s%(episode_number|)02d%(height& |)s%(height|)s%(height&p|)s%(fps|)s%(fps&fps|)s%(tbr& |)s%(tbr|)d.%(ext)s",
-            }
-        elif "download_ranges" in options:
-            self.opts["outtmpl"] = {
-                "default": f"{path}/{base_name}/%(section_number|)s%(section_number&.|)s%(section_title|)s%(section_title&-|)s%(title,fulltitle,alt_title)s %(section_start)s to %(section_end)s.%(ext)s",
-                "thumbnail": f"{path}/yt-dlp-thumb/%(section_number|)s%(section_number&.|)s%(section_title|)s%(section_title&-|)s%(title,fulltitle,alt_title)s %(section_start)s to %(section_end)s.%(ext)s",
-            }
-        elif any(
-            key in options
-            for key in [
-                "writedescription",
-                "writeinfojson",
-                "writeannotations",
-                "writedesktoplink",
-                "writewebloclink",
-                "writeurllink",
-                "writesubtitles",
-                "writeautomaticsub",
-            ]
-        ):
-            self.opts["outtmpl"] = {
-                "default": f"{path}/{base_name}/{self._listener.name}",
-                "thumbnail": f"{path}/yt-dlp-thumb/{base_name}.%(ext)s",
+                "default": f"{path}/{generic_name_tmpl}.%(ext)s",
+                "thumbnail": f"{path}/yt-dlp-thumb/{generic_name_tmpl}.%(ext)s",
             }
         else:
-            self.opts["outtmpl"] = {
-                "default": f"{path}/{self._listener.name}",
-                "thumbnail": f"{path}/yt-dlp-thumb/{base_name}.%(ext)s",
-            }
+            trim_name = self._listener.name if self.is_playlist else base_name
+            if len(trim_name.encode()) > 200:
+                self._listener.name = (
+                    self._listener.name[:200]
+                    if self.is_playlist
+                    else f"{base_name[:200]}{ext}"
+                )
+                base_name = ospath.splitext(self._listener.name)[0]
+
+            if self.is_playlist:
+                self.opts["outtmpl"] = {
+                    "default": f"{path}/{self._listener.name}/%(title,fulltitle,alt_title)s%(season_number& |)s%(season_number&S|)s%(season_number|)02d%(episode_number&E|)s%(episode_number|)02d%(height& |)s%(height|)s%(height&p|)s%(fps|)s%(fps&fps|)s%(tbr& |)s%(tbr|)d.%(ext)s",
+                    "thumbnail": f"{path}/yt-dlp-thumb/%(title,fulltitle,alt_title)s%(season_number& |)s%(season_number&S|)s%(season_number|)02d%(episode_number&E|)s%(episode_number|)02d%(height& |)s%(height|)s%(height&p|)s%(fps|)s%(fps&fps|)s%(tbr& |)s%(tbr|)d.%(ext)s",
+                }
+            elif "download_ranges" in options:
+                self.opts["outtmpl"] = {
+                    "default": f"{path}/{base_name}/%(section_number|)s%(section_number&.|)s%(section_title|)s%(section_title&-|)s%(title,fulltitle,alt_title)s %(section_start)s to %(section_end)s.%(ext)s",
+                    "thumbnail": f"{path}/yt-dlp-thumb/%(section_number|)s%(section_number&.|)s%(section_title|)s%(section_title&-|)s%(title,fulltitle,alt_title)s %(section_start)s to %(section_end)s.%(ext)s",
+                }
+            elif any(
+                key in options
+                for key in [
+                    "writedescription",
+                    "writeinfojson",
+                    "writeannotations",
+                    "writedesktoplink",
+                    "writewebloclink",
+                    "writeurllink",
+                    "writesubtitles",
+                    "writeautomaticsub",
+                ]
+            ):
+                self.opts["outtmpl"] = {
+                    "default": f"{path}/{base_name}/{self._listener.name}",
+                    "thumbnail": f"{path}/yt-dlp-thumb/{base_name}.%(ext)s",
+                }
+            else:
+                self.opts["outtmpl"] = {
+                    "default": f"{path}/{self._listener.name}",
+                    "thumbnail": f"{path}/yt-dlp-thumb/{base_name}.%(ext)s",
+                }
 
         if qual.startswith("ba/b"):
             self._listener.name = f"{base_name}{self._ext}"
