@@ -44,6 +44,18 @@ async def handle_direct_message(client, message):
     url = extract_url_from_text(text)
 
     if url:
+        # Debug：打印当前 URL 和配置值，方便排查
+        try:
+            is_tg = is_telegram_link(url)
+            LOGGER.info(
+                "Direct-link debug: url=%s, is_telegram=%s, DIRECT_TG_LINK_ENABLED=%s",
+                url,
+                is_tg,
+                getattr(Config, "DIRECT_TG_LINK_ENABLED", None),
+            )
+        except Exception:
+            pass
+
         # 如果是 Telegram 链接且配置关闭直链处理，则直接忽略
         try:
             if is_telegram_link(url) and not getattr(Config, "DIRECT_TG_LINK_ENABLED", True):
