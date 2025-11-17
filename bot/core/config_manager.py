@@ -91,6 +91,7 @@ class Config:
     PARSE_VIDEO_EXEMPT_CONFIG_AUTH = True
     PARSE_VIDEO_MEMBERSHIP_CACHE_TTL = 60
     NO_HIDE_CHATS = []
+    DIRECT_TG_LINK_ENABLED = True
 
     @classmethod
     def _convert(cls, key: str, value):

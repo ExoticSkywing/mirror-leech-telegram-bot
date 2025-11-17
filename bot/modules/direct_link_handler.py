@@ -8,6 +8,7 @@ from bot.core.config_manager import Config
 from bot.helper.ext_utils.membership_utils import check_membership
 from bot.helper.ext_utils.bot_utils import new_task
 from bot.helper.ext_utils.url_utils import extract_url_from_text
+from bot.helper.ext_utils.links_utils import is_telegram_link
 from bot.helper.telegram_helper.filters import CustomFilters
 from bot.helper.telegram_helper.message_utils import send_message, edit_message, auto_delete_message
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -41,8 +42,16 @@ async def handle_direct_message(client, message):
     
     # 提取URL
     url = extract_url_from_text(text)
-    
+
     if url:
+        # 如果是 Telegram 链接且配置关闭直链处理，则直接忽略
+        try:
+            if is_telegram_link(url) and not getattr(Config, "DIRECT_TG_LINK_ENABLED", True):
+                LOGGER.info(f"Direct Telegram link ignored due to config: {url[:50]}...")
+                return
+        except Exception:
+            pass
+
         # 有链接：直链入口权限校验（仅 direct_only 或 all 生效）
         try:
             if Config.PARSE_VIDEO_CHANNEL_CHECK_ENABLED and Config.PARSE_VIDEO_CHECK_SCOPE in {"direct_only", "all"}:
