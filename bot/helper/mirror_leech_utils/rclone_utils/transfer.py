@@ -18,6 +18,26 @@ from ...ext_utils.files_utils import (
 LOGGER = getLogger(__name__)
 
 
+def _safe_decode(data: bytes) -> str:
+    """Decode bytes from rclone output, tolerant to non-UTF8 (e.g. Chinese) text.
+
+    Prefer utf-8, fall back to gb18030, and finally ignore invalid bytes to
+    guarantee we never raise UnicodeDecodeError while still preserving
+    readable content when possible.
+    """
+
+    if isinstance(data, str):
+        return data
+
+    for enc in ("utf-8", "gb18030"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+
+    return data.decode("utf-8", errors="ignore")
+
+
 class RcloneTransferHelper:
     def __init__(self, listener):
         self._listener = listener
@@ -67,7 +87,8 @@ class RcloneTransferHelper:
                 break
             if not data:
                 break
-            data = data.decode().strip()
+            # 使用安全解码，兼容包含中文在内的非 UTF-8 输出，避免任务因解码失败而中断
+            data = _safe_decode(data).strip()
             if data := re_findall(
                 r"Transferred:\s+([\d.]+\s*\w+)\s+/\s+([\d.]+\s*\w+),\s+([\d.]+%)\s*,\s+([\d.]+\s*\w+/s),\s+ETA\s+([\dwdhms]+)",
                 data,
@@ -127,7 +148,8 @@ class RcloneTransferHelper:
         if return_code == 0:
             await self._listener.on_download_complete()
         elif return_code != -9:
-            error = stderr.decode().strip()
+            # 使用安全解码处理包含中文的错误信息
+            error = _safe_decode(stderr).strip()
             if not error and remote_type == "drive" and self._use_service_accounts:
                 error = "Mostly your service accounts don't have access to this drive!"
             LOGGER.error(error)
@@ -241,7 +263,8 @@ class RcloneTransferHelper:
         elif return_code == 0:
             return True
         else:
-            error = stderr.decode().strip()
+            # 使用安全解码处理包含中文的错误信息
+            error = _safe_decode(stderr).strip()
             LOGGER.error(error)
             if (
                 self._sa_number != 0

@@ -19,6 +19,10 @@ def is_gdrive_link(url: str):
 
 
 def is_telegram_link(url: str):
+    # Normalize whitespace to avoid leading/trailing spaces affecting detection
+    if not isinstance(url, str):
+        return False
+    url = url.strip()
     return url.startswith(("https://t.me/", "tg://openmessage?user_id="))
 
 

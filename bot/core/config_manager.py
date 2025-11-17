@@ -165,7 +165,11 @@ class Config:
 
     @classmethod
     def _process_config_value(cls, attr: str, value):
-        if not value:
+        # 仅将 None 或空字符串视为“未配置”，保留 False/0 等有效值
+        if value is None:
+            return None
+
+        if isinstance(value, str) and not value.strip():
             return None
 
         converted_value = cls._convert(attr, value)
@@ -246,7 +250,14 @@ class Config:
 
     @classmethod
     def load_dict(cls, config_dict) -> None:
+        # Certain flags should only be controlled via local config/env,
+        # and must not be overridden by remote database config.
+        skip_keys = {"DIRECT_TG_LINK_ENABLED"}
+
         for key, value in config_dict.items():
+            if key in skip_keys:
+                continue
+
             if not hasattr(cls, key):
                 continue
 
